@@ -168,6 +168,9 @@ def parse_awr(html):
     cdb_status = "N/A"
     memory_gb = "N/A"  # Initialize at the beginning of parse_awr
     platform = "N/A"
+    instance_name = "N/A"
+    instance_num = "N/A"
+    startup_time = "N/A"
     begin_snap_time = "N/A"
     end_snap_time = "N/A"
     total_cpu = rac_status = edition = release = "N/A"
@@ -180,7 +183,7 @@ def parse_awr(html):
         df = to_df(table)
         if df is not None and not df.empty:
             df_str = df.astype(str)
-            lower_headers = [str(c).lower() for c in df.columns]
+            lower_headers = [str(c).lower().strip() for c in df.columns]
 
             # Extract Edition, Release, RAC, CDB
             if 'edition' in lower_headers and 'release' in lower_headers:
@@ -239,6 +242,18 @@ def parse_awr(html):
                 except:
                     pass
 
+            # ✅ NEW: Extract Instance, Instance Number, Startup Time
+            if 'instance' in lower_headers and 'inst num' in lower_headers and 'startup time' in lower_headers:
+                try:
+                    idx_instance = lower_headers.index('instance')
+                    idx_inst_num = lower_headers.index('inst num')
+                    idx_startup = lower_headers.index('startup time')
+
+                    instance_name = str(df.iloc[0, idx_instance]).strip()
+                    instance_num = str(df.iloc[0, idx_inst_num]).strip()
+                    startup_time = str(df.iloc[0, idx_startup]).strip()
+                except:
+                    pass
 
 
 
@@ -419,6 +434,9 @@ def parse_awr(html):
         'cdb_status': cdb_status,
         'memory_gb': memory_gb,
         'platform': platform,
+        'instance_name': instance_name,
+        'instance_num': instance_num,
+        'startup_time': startup_time,
         'begin_snap_time': begin_snap_time,
         'end_snap_time': end_snap_time,
         'wait_events': wait_events,
@@ -464,14 +482,9 @@ for uploaded in uploaded_files:
 # Show the selected report's data
 st.subheader(f"📄 Report: {selected_file}")
 st.write(f"**Database Name:** {data['db_name']}")
-st.write(f"**Snapshot Time:** {data['snap_time']}")
 
-# Example chart
-if not data['load_profile'].empty:
-    fig1 = px.bar(data['load_profile'], x='Metric', y='Per Second', title='Load Profile', color='Metric', text='Per Second')
-    st.plotly_chart(fig1, use_container_width=True)
-else:
-    st.warning("Load Profile not found.")
+
+
 
 
 # DB Time
@@ -495,6 +508,9 @@ st.markdown("""
     <div class="card"><h4>🏢 CDB Status</h4><p>{cdb}</p></div>
     <div class="card"><h4>🟢 Begin Snap Time</h4><p>{begin}</p></div>
     <div class="card"><h4>🔴 End Snap Time</h4><p>{end}</p></div>
+    <div class="card"><h4>📌 Instance</h4><p>{instance}</p></div>
+    <div class="card"><h4>#️⃣ Instance Number</h4><p>{inst_num}</p></div>
+    <div class="card"><h4>⏰ Startup Time</h4><p>{startup}</p></div>
 </div>
 """.format(
     cpu=data['total_cpu'],
@@ -504,28 +520,16 @@ st.markdown("""
     platform=data['platform'],
     cdb=data['cdb_status'],
     begin=data['begin_snap_time'],
-    end=data['end_snap_time']
+    end=data['end_snap_time'],
+    instance=data['instance_name'],
+    inst_num=data['instance_num'],
+    startup=data['startup_time']
 ), unsafe_allow_html=True)
 
 
 
 
 
-# AWR Environment Info
-st.markdown("""
-<div style='margin-top: 2rem; margin-bottom: 1rem; padding: 1rem; background: linear-gradient(to right, #f7971e, #ffd200); border-radius: 10px;'>
-    <h4 style='color:#222; margin: 0;'>🛠️ AWR Environment Info</h4>
-</div>
-<div class="card-container">
-    <div class="card"><h4>🖥️ Total CPUs</h4><p>{cpu}</p></div>
-    <div class="card"><h4>🗃️ RAC Status</h4><p>{rac}</p></div>
-    <div class="card"><h4>🔖 Edition/Release</h4><p>{edition}</p></div>
-</div>
-""".format(
-    cpu=data['total_cpu'],
-    rac=data['rac_status'],
-    edition=data['edition']
-), unsafe_allow_html=True)
 
 # Load Profile
 st.markdown("### 📊 Load Profile (Per Second)")
@@ -975,21 +979,39 @@ if not ash_df.empty and 'Event' in ash_df.columns:
     )
 
 # All sections
+# All sections
 report_dict = {
+    # ✅ Environment Info comes first
+    'Environment_Info': pd.DataFrame({
+        'Database Name':      [data['db_name']],
+        'Instance':           [data['instance_name']],
+        'Instance Number':    [data['instance_num']],
+        'Startup Time':       [data['startup_time']],
+        'Total CPUs':         [data['total_cpu']],
+        'RAC Status':         [data['rac_status']],
+        'Edition/Release':    [data['edition']],
+        'Memory (GB)':        [data['memory_gb']],
+        'Platform':           [data['platform']],
+        'CDB Status':         [data['cdb_status']],
+        'Begin Snap Time':    [data['begin_snap_time']],
+        'End Snap Time':      [data['end_snap_time']]
+    }),
+
+    # Existing sections follow
     'Load_Profile': data['load_profile'],
     'Wait_Events': data['wait_events'],
     'Top_SQL_Elapsed': data['top_sql'],
     'Top_SQL_CPU': data['top_cpu_sql'],
     'Init_Params': data['init_params'],
-    'ASH_Data': ash_df,
-    'ASH_Top_Events': ash_top_events,
     'PGA_Advisory': data['pga_advisory'],
     'SGA_Advisory': data['sga_advisory'],
     'Segments_Physical_Reads': data['seg_physical_reads'],
-    'Segments_Row_Lock_Waits': data['seg_row_lock_waits'],  # ✅ Added Segments by Row Lock Waits
-    'Top_SQL_Events': data['top_sql_events'],               # ✅ Added Top SQL with Top Events
-    'Activity_Over_Time': data['activity_over_time']        # ✅ Added Activity Over Time section
+    'Segments_Row_Lock_Waits': data['seg_row_lock_waits'],
+    'Top_SQL_Events': data['top_sql_events'],
+    'Activity_Over_Time': data['activity_over_time']
 }
+
+
 
 
 
@@ -1039,16 +1061,24 @@ def df_to_text(df, title):
 # Build full report content
 pdf_content = f"""Oracle AWR Analyzer - Full Text Report
 
-🔹 DB Name: {data['db_name']}
-🔹 Snapshot Time: {data['snap_time']}
-🔹 Idle CPU: {data['idle_cpu']}%
-🔹 DB Time/s: {db_time}
-🔹 Total CPUs: {data['total_cpu']}
-🔹 RAC Status: {data['rac_status']}
-🔹 Edition: {data['edition']}
 """
 
 # Add data sections
+# Add Environment Info to Text Report
+pdf_content += "\n\n🛠️ AWR Environment Info\n" + "-" * 30
+pdf_content += f"\nDatabase Name:      {data['db_name']}"
+pdf_content += f"\nInstance:           {data['instance_name']}"
+pdf_content += f"\nInstance Number:    {data['instance_num']}"
+pdf_content += f"\nStartup Time:       {data['startup_time']}"
+pdf_content += f"\nTotal CPUs:         {data['total_cpu']}"
+pdf_content += f"\nRAC Status:         {data['rac_status']}"
+pdf_content += f"\nEdition/Release:    {data['edition']}"
+pdf_content += f"\nMemory (GB):        {data['memory_gb']}"
+pdf_content += f"\nPlatform:           {data['platform']}"
+pdf_content += f"\nCDB Status:         {data['cdb_status']}"
+pdf_content += f"\nBegin Snap Time:    {data['begin_snap_time']}"
+pdf_content += f"\nEnd Snap Time:      {data['end_snap_time']}"
+
 pdf_content += df_to_text(data['load_profile'], "📊 Load Profile (Per Second)")
 pdf_content += df_to_text(data['wait_events'], "⏳ Top Wait Events (% DB Time)")
 pdf_content += df_to_text(data['top_sql'], "🔥 Top 5 SQL by Elapsed Time")
