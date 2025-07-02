@@ -155,6 +155,7 @@ def parse_awr(html):
     seg_row_lock_waits = pd.DataFrame()  
     top_sql_events = pd.DataFrame() 
     activity_over_time = pd.DataFrame()
+    init_params = pd.DataFrame()
 
     def to_df(table):
         try:
@@ -162,18 +163,22 @@ def parse_awr(html):
         except:
             return None
 
-    # Default values
+    # Default values for other fields
     db_name = "N/A"
     snap_time = "N/A"
     cdb_status = "N/A"
-    memory_gb = "N/A"  # Initialize at the beginning of parse_awr
+    memory_gb = "N/A"
     platform = "N/A"
     instance_name = "N/A"
     instance_num = "N/A"
     startup_time = "N/A"
     begin_snap_time = "N/A"
     end_snap_time = "N/A"
-    total_cpu = rac_status = edition = release = "N/A"
+    total_cpu = "N/A"
+    rac_status = "N/A"
+    edition = "N/A"
+    release = "N/A"
+
     top_sql = pd.DataFrame()
     top_cpu_sql = pd.DataFrame()
     efficiency_df = pd.DataFrame()
@@ -427,7 +432,7 @@ def parse_awr(html):
                     activity_over_time = df
             break
 
-    return {
+        return {
         'db_name': db_name,
         'snap_time': snap_time,
         'load_profile': load_profile,
@@ -443,47 +448,128 @@ def parse_awr(html):
         'idle_cpu': idle_cpu,
         'top_sql': top_sql,
         'top_cpu_sql': top_cpu_sql,
-        'init_params': init_params,
+        'init_params': init_params,  # ✅ Now guaranteed to exist
         'seg_physical_reads': seg_physical_reads,
         'seg_row_lock_waits': seg_row_lock_waits,
         'total_cpu': total_cpu,
         'rac_status': rac_status,
         'edition': f"{edition} {release}" if release != "N/A" else edition,
-        
-        # ✅ Newly added advisory outputs
         'pga_advisory': pga_advisory_df,
         'sga_advisory': sga_advisory_df,
         'top_sql_events': top_sql_events,
         'activity_over_time': activity_over_time
     }
 
-
-# Upload file
-# Multi-file uploader
-uploaded_files = st.file_uploader("📤 Upload AWR HTML reports", type="html", accept_multiple_files=True)
+# Upload file - Main uploader
+uploaded_files = st.file_uploader("📤 Upload AWR HTML reports", type="html", accept_multiple_files=True, key="main_uploader")
 
 if not uploaded_files:
     st.info("Please upload one or more AWR HTML reports to parse.")
     st.stop()
 
-# Build a list of file names
+# Build list of file names
 file_names = [file.name for file in uploaded_files]
 
-# Let user pick which report to display
-selected_file = st.selectbox("Select an AWR report to view:", file_names)
+# Select report to view
+selected_file = st.selectbox("Select an AWR report to view:", file_names, key="select_main_report")
 
-# Find the selected file
+# Find and parse selected file
+data = None
 for uploaded in uploaded_files:
     if uploaded.name == selected_file:
-        html = uploaded.read().decode('utf-8')
-        data = parse_awr(html)  # Assumes parse_awr() is defined
+        html = uploaded.getvalue().decode('utf-8')
+        try:
+            data = parse_awr(html)
+        except Exception as e:
+            st.error(f"Error parsing AWR report: {e}")
+            data = None
         break
 
-# Show the selected report's data
-st.subheader(f"📄 Report: {selected_file}")
-st.write(f"**Database Name:** {data['db_name']}")
+if data:
+    st.subheader(f"📄 Report: {selected_file}")
+    st.write(f"**Database Name:** {data['db_name']}")
+else:
+    st.error("Failed to parse the selected AWR report. Please check the file.")
+    st.stop()
+
+# ---------------- Side-by-side Comparison Feature ---------------- #
+if len(uploaded_files) >= 2:
+    st.markdown("### 🔍 Compare Two AWR Reports Side by Side")
+
+    if "compare_files" not in st.session_state:
+        st.session_state.compare_files = []
+
+    # Show multiselect only if less than 2 selected
+    if len(st.session_state.compare_files) < 2:
+        selected = st.multiselect(
+            "Select exactly 2 reports to compare:",
+            file_names,
+            default=st.session_state.compare_files,
+            key="select_compare_reports_internal"
+        )
+        st.session_state.compare_files = selected
+    else:
+        st.info(f"Selected Reports: **{st.session_state.compare_files[0]}** and **{st.session_state.compare_files[1]}**")
+
+    if len(st.session_state.compare_files) == 2:
+        # Proceed with comparison logic...
 
 
+        data_1, data_2 = None, None
+
+        for uploaded in uploaded_files:
+            if uploaded.name == st.session_state.compare_files[0]:
+                html_1 = uploaded.getvalue().decode('utf-8')
+                data_1 = parse_awr(html_1)
+            elif uploaded.name == st.session_state.compare_files[1]:
+                html_2 = uploaded.getvalue().decode('utf-8')
+                data_2 = parse_awr(html_2)
+
+        if data_1 and data_2:
+            st.success(f"Comparing **{st.session_state.compare_files[0]}** vs **{st.session_state.compare_files[1]}**")
+
+            st.markdown("### 🛠️ Environment Info Comparison")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**{st.session_state.compare_files[0]}**")
+                st.write(f"**DB Name:** {data_1['db_name']}")
+                st.write(f"**Total CPUs:** {data_1['total_cpu']}")
+                st.write(f"**Memory (GB):** {data_1['memory_gb']}")
+                st.write(f"**Platform:** {data_1['platform']}")
+                st.write(f"**Begin Snap:** {data_1['begin_snap_time']}")
+                st.write(f"**End Snap:** {data_1['end_snap_time']}")
+            with col2:
+                st.write(f"**{st.session_state.compare_files[1]}**")
+                st.write(f"**DB Name:** {data_2['db_name']}")
+                st.write(f"**Total CPUs:** {data_2['total_cpu']}")
+                st.write(f"**Memory (GB):** {data_2['memory_gb']}")
+                st.write(f"**Platform:** {data_2['platform']}")
+                st.write(f"**Begin Snap:** {data_2['begin_snap_time']}")
+                st.write(f"**End Snap:** {data_2['end_snap_time']}")
+
+            # Section Comparisons
+            sections = [
+                ("Load Profile", "load_profile"),
+                ("Wait Events", "wait_events"),
+                ("Top SQL by Elapsed Time", "top_sql"),
+                ("Top SQL by CPU Time", "top_cpu_sql"),
+                ("SGA Advisory", "sga_advisory"),
+                ("PGA Advisory", "pga_advisory"),
+                ("Segments by Physical Reads", "seg_physical_reads"),
+                ("Segments by Row Lock Waits", "seg_row_lock_waits"),
+                ("Top SQL with Events", "top_sql_events"),
+                ("Initialization Parameters", "init_params")
+            ]
+
+            for title, key in sections:
+                st.markdown(f"### 🔍 {title} Comparison")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**{st.session_state.compare_files[0]} {title}**")
+                    st.dataframe(data_1[key], use_container_width=True)
+                with col2:
+                    st.write(f"**{st.session_state.compare_files[1]} {title}**")
+                    st.dataframe(data_2[key], use_container_width=True)
 
 
 
