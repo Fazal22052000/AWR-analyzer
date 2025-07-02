@@ -165,6 +165,11 @@ def parse_awr(html):
     # Default values
     db_name = "N/A"
     snap_time = "N/A"
+    cdb_status = "N/A"
+    memory_gb = "N/A"  # Initialize at the beginning of parse_awr
+    platform = "N/A"
+    begin_snap_time = "N/A"
+    end_snap_time = "N/A"
     total_cpu = rac_status = edition = release = "N/A"
     top_sql = pd.DataFrame()
     top_cpu_sql = pd.DataFrame()
@@ -175,20 +180,68 @@ def parse_awr(html):
         df = to_df(table)
         if df is not None and not df.empty:
             df_str = df.astype(str)
-
             lower_headers = [str(c).lower() for c in df.columns]
+
+            # Extract Edition, Release, RAC, CDB
             if 'edition' in lower_headers and 'release' in lower_headers:
                 try:
                     idx_edition = lower_headers.index('edition')
                     idx_release = lower_headers.index('release')
                     idx_rac = lower_headers.index('rac') if 'rac' in lower_headers else None
+                    idx_cdb = lower_headers.index('cdb') if 'cdb' in lower_headers else None
+
                     edition = str(df.iloc[0, idx_edition]).strip()
                     release = str(df.iloc[0, idx_release]).strip()
+
                     if idx_rac is not None:
                         rac_text = str(df.iloc[0, idx_rac]).strip().lower()
                         rac_status = 'RAC' if 'yes' in rac_text else 'Single Instance'
+
+                    if idx_cdb is not None:
+                        cdb_text = str(df.iloc[0, idx_cdb]).strip().lower()
+                        cdb_status = 'CDB' if 'yes' in cdb_text else 'Non-CDB'
+
                 except:
                     pass
+
+            # Extract Memory (GB)
+            if 'memory (gb)' in lower_headers:
+                try:
+                    idx_mem = lower_headers.index('memory (gb)')
+                    mem_val = str(df.iloc[0, idx_mem]).strip()
+                    memory_gb = mem_val if mem_val else "N/A"
+                except:
+                    pass
+
+            # Extract Platform
+            if 'platform' in lower_headers:
+                try:
+                    idx_platform = lower_headers.index('platform')
+                    platform_val = str(df.iloc[0, idx_platform]).strip()
+                    platform = platform_val if platform_val else "N/A"
+                except:
+                    pass
+
+            # Extract Begin and End Snap Time
+            if 'snap id' in lower_headers and 'snap time' in lower_headers:
+                try:
+                    idx_time = lower_headers.index('snap time')
+
+                    begin_snap_row = df[df.iloc[:, 0].astype(str).str.contains("Begin Snap", case=False, na=False)]
+                    end_snap_row = df[df.iloc[:, 0].astype(str).str.contains("End Snap", case=False, na=False)]
+
+                    if not begin_snap_row.empty:
+                        begin_snap_time = str(begin_snap_row.iloc[0, idx_time]).strip()
+
+                    if not end_snap_row.empty:
+                        end_snap_time = str(end_snap_row.iloc[0, idx_time]).strip()
+
+                except:
+                    pass
+
+
+
+
 
             for i, row in df_str.iterrows():
                 for j, val in enumerate(row):
@@ -363,6 +416,11 @@ def parse_awr(html):
         'db_name': db_name,
         'snap_time': snap_time,
         'load_profile': load_profile,
+        'cdb_status': cdb_status,
+        'memory_gb': memory_gb,
+        'platform': platform,
+        'begin_snap_time': begin_snap_time,
+        'end_snap_time': end_snap_time,
         'wait_events': wait_events,
         'idle_cpu': idle_cpu,
         'top_sql': top_sql,
@@ -383,13 +441,38 @@ def parse_awr(html):
 
 
 # Upload file
-uploaded = st.file_uploader("📤 Upload your AWR HTML report", type="html")
-if not uploaded:
-    st.info("Please upload an AWR HTML report to parse.")
+# Multi-file uploader
+uploaded_files = st.file_uploader("📤 Upload AWR HTML reports", type="html", accept_multiple_files=True)
+
+if not uploaded_files:
+    st.info("Please upload one or more AWR HTML reports to parse.")
     st.stop()
 
-html = uploaded.read().decode('utf-8')
-data = parse_awr(html)
+# Build a list of file names
+file_names = [file.name for file in uploaded_files]
+
+# Let user pick which report to display
+selected_file = st.selectbox("Select an AWR report to view:", file_names)
+
+# Find the selected file
+for uploaded in uploaded_files:
+    if uploaded.name == selected_file:
+        html = uploaded.read().decode('utf-8')
+        data = parse_awr(html)  # Assumes parse_awr() is defined
+        break
+
+# Show the selected report's data
+st.subheader(f"📄 Report: {selected_file}")
+st.write(f"**Database Name:** {data['db_name']}")
+st.write(f"**Snapshot Time:** {data['snap_time']}")
+
+# Example chart
+if not data['load_profile'].empty:
+    fig1 = px.bar(data['load_profile'], x='Metric', y='Per Second', title='Load Profile', color='Metric', text='Per Second')
+    st.plotly_chart(fig1, use_container_width=True)
+else:
+    st.warning("Load Profile not found.")
+
 
 # DB Time
 db_time = None
@@ -400,21 +483,33 @@ if not lp.empty and lp['Metric'].astype(str).str.contains('DB Time').any():
 
 # AWR Summary
 st.markdown("""
-<div style='padding: 1rem; background: linear-gradient(90deg, #6dd5ed, #2193b0); color: white; border-radius: 10px; text-align: center;'>
-    <h3>📌 AWR Summary</h3>
+<div style='margin-top: 2rem; margin-bottom: 1rem; padding: 1rem; background: linear-gradient(to right, #f7971e, #ffd200); border-radius: 10px;'>
+    <h4 style='color:#222; margin: 0;'>🛠️ AWR Environment Info</h4>
 </div>
 <div class="card-container">
-    <div class="card"><h4>🧠 DB Name</h4><p>{db_name}</p></div>
-    <div class="card"><h4>⏱️ Snapshot Time</h4><p>{snap_time}</p></div>
-    <div class="card"><h4>🧍 Idle CPU %</h4><p>{idle_cpu}</p></div>
-    <div class="card"><h4>⚙️ DB Time/s</h4><p>{db_time}</p></div>
+    <div class="card"><h4>🖥️ Total CPUs</h4><p>{cpu}</p></div>
+    <div class="card"><h4>🗃️ RAC Status</h4><p>{rac}</p></div>
+    <div class="card"><h4>🔖 Edition/Release</h4><p>{edition}</p></div>
+    <div class="card"><h4>💾 Memory (GB)</h4><p>{memory}</p></div>
+    <div class="card"><h4>💻 Platform</h4><p>{platform}</p></div>
+    <div class="card"><h4>🏢 CDB Status</h4><p>{cdb}</p></div>
+    <div class="card"><h4>🟢 Begin Snap Time</h4><p>{begin}</p></div>
+    <div class="card"><h4>🔴 End Snap Time</h4><p>{end}</p></div>
 </div>
 """.format(
-    db_name=data['db_name'],
-    snap_time=data['snap_time'],
-    idle_cpu=f"{data['idle_cpu']:.1f}%" if data['idle_cpu'] is not None else "N/A",
-    db_time=db_time if db_time else "N/A"
+    cpu=data['total_cpu'],
+    rac=data['rac_status'],
+    edition=data['edition'],
+    memory=data['memory_gb'],
+    platform=data['platform'],
+    cdb=data['cdb_status'],
+    begin=data['begin_snap_time'],
+    end=data['end_snap_time']
 ), unsafe_allow_html=True)
+
+
+
+
 
 # AWR Environment Info
 st.markdown("""
