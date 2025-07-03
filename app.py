@@ -423,6 +423,7 @@ def parse_awr(html):
                     top_sql_events = df
             break
 
+    # Extract Activity Over Time section
     for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
         if "Activity Over Time" in tag.text:
             next_table = tag.find_next("table")
@@ -430,9 +431,10 @@ def parse_awr(html):
                 df = to_df(next_table)
                 if df is not None and not df.empty:
                     activity_over_time = df
-            break
+            break  # Exit loop after finding the section
 
-        return {
+
+    return {
         'db_name': db_name,
         'snap_time': snap_time,
         'load_profile': load_profile,
@@ -448,7 +450,7 @@ def parse_awr(html):
         'idle_cpu': idle_cpu,
         'top_sql': top_sql,
         'top_cpu_sql': top_cpu_sql,
-        'init_params': init_params,  # ✅ Now guaranteed to exist
+        'init_params': init_params,
         'seg_physical_reads': seg_physical_reads,
         'seg_row_lock_waits': seg_row_lock_waits,
         'total_cpu': total_cpu,
@@ -558,7 +560,8 @@ if len(uploaded_files) >= 2:
                 ("Segments by Physical Reads", "seg_physical_reads"),
                 ("Segments by Row Lock Waits", "seg_row_lock_waits"),
                 ("Top SQL with Events", "top_sql_events"),
-                ("Initialization Parameters", "init_params")
+                ("Initialization Parameters", "init_params"),
+                ("Activity Over Time", "activity_over_time")
             ]
 
             for title, key in sections:
