@@ -287,15 +287,40 @@ def parse_awr(html):
                 except:
                     pass
 
-            try:
-                cols = [str(c).lower() for c in df.columns]
-                if all(col in cols for col in ['sql id', 'sql text', 'elapsed time (s)']):
-                    top_sql = df[[c for c in df.columns if str(c).lower() in ['sql id', 'sql text', 'elapsed time (s)']]].head(5)
+    # SQL ordered by Elapsed Time
+    for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
+        if "SQL ordered by Elapsed Time" in tag.text:
+            next_table = tag.find_next("table")
+            if next_table:
+                df = to_df(next_table)
+                if df is not None and not df.empty:
+                    cols = [str(c).strip().lower() for c in df.columns]
+                    if all(col in cols for col in ['sql id', 'sql text', 'elapsed time (s)']):
+                        top_sql = df[[c for c in df.columns if str(c).lower() in ['sql id', 'sql text', 'elapsed time (s)']]]
+            break
 
-                if all(col in cols for col in ['sql id', 'sql text', 'cpu time (s)']):
-                    top_cpu_sql = df[[c for c in df.columns if str(c).lower() in ['sql id', 'sql text', 'cpu time (s)']]].head(5)
-            except:
-                pass
+    # SQL ordered by CPU Time
+    for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
+        if "SQL ordered by CPU Time" in tag.text:
+            next_table = tag.find_next("table")
+            if next_table:
+                df = to_df(next_table)
+                if df is not None and not df.empty:
+                    cols = [str(c).strip().lower() for c in df.columns]
+                    if all(col in cols for col in ['sql id', 'sql text', 'cpu time (s)']):
+                        top_cpu_sql = df[[c for c in df.columns if str(c).lower() in ['sql id', 'sql text', 'cpu time (s)']]]
+            break
+
+    for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
+        if "Complete List of SQL Text" in tag.text:
+            next_table = tag.find_next("table")
+            if next_table:
+                df_sql_texts = to_df(next_table)
+                if df_sql_texts is not None and not df_sql_texts.empty:
+                    df_sql_texts.columns = df_sql_texts.columns.str.strip().str.upper()
+                    full_sql_text_df = df_sql_texts[['SQL ID', 'SQL TEXT']].copy()
+            break
+
     
     # Corrected Initialization Parameters Extraction Logic
     for a in soup.find_all("a"):
@@ -311,6 +336,8 @@ def parse_awr(html):
                         init_params = init_params.dropna().reset_index(drop=True)
                         break
 
+    
+    
     
     # Look for the table AFTER detecting 'Instance Efficiency Percentages' label
     for i, tag in enumerate(soup.find_all()):
@@ -459,7 +486,8 @@ def parse_awr(html):
         'pga_advisory': pga_advisory_df,
         'sga_advisory': sga_advisory_df,
         'top_sql_events': top_sql_events,
-        'activity_over_time': activity_over_time
+        'activity_over_time': activity_over_time,
+        'full_sql_texts': full_sql_text_df
     }
 
 # Upload file - Main uploader
@@ -640,8 +668,8 @@ if not data['wait_events'].empty:
 else:
     st.warning("Wait Events table not found.")
 
-# 🔥 Top 5 SQL by Elapsed Time
-st.markdown("### 🔥 Top 5 SQL by Elapsed Time")
+# 🔥 Top SQL by Elapsed Time
+st.markdown("### 🔥 Top SQL by Elapsed Time")
 
 if not data['top_sql'].empty:
     df_top_sql = data['top_sql'].copy()
@@ -652,23 +680,25 @@ if not data['top_sql'].empty:
     # Required columns
     required_columns = ['SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)']
     if all(col in df_top_sql.columns for col in required_columns):
+        
         # Parse elapsed time
         df_top_sql['ELAPSED TIME (S)'] = pd.to_numeric(df_top_sql['ELAPSED TIME (S)'], errors='coerce')
 
         # Create label as SQL_ID | truncated SQL_TEXT
         df_top_sql['SQL_ID'] = df_top_sql['SQL ID'].astype(str) + " | " + df_top_sql['SQL TEXT'].astype(str).str.slice(0, 50) + '...'
 
-        # Plot
+        # Plot with improved dark red gradient
         fig_elapsed = px.bar(
             df_top_sql.sort_values('ELAPSED TIME (S)'),
             y='SQL_ID',
             x='ELAPSED TIME (S)',
             orientation='h',
             text='ELAPSED TIME (S)',
-            title='Top 5 SQL by Elapsed Time',
+            title='Top SQL by Elapsed Time',
             color='ELAPSED TIME (S)',
-            color_continuous_scale='reds'
+            color_continuous_scale=["#800000", "#B22222", "#DC143C", "#FF6347"]  # Dark to lighter reds
         )
+
         fig_elapsed.update_layout(
             yaxis_title="SQL ID | SQL Text",
             xaxis_title="Elapsed Time (s)",
@@ -683,9 +713,10 @@ else:
     st.warning("Top SQL by Elapsed Time not found.")
 
 
+
 # Top SQL by CPU Time (Graphical)
-# Top SQL by CPU Time (Graphical)
-st.markdown("### ⚡ Top 5 SQL by CPU Time")
+
+st.markdown("### ⚡ Top SQL by CPU Time")
 
 if not data['top_cpu_sql'].empty:
     df_cpu_sql = data['top_cpu_sql'].copy()
@@ -696,19 +727,25 @@ if not data['top_cpu_sql'].empty:
     # Required columns
     required_columns = ['SQL ID', 'SQL TEXT', 'CPU TIME (S)']
     if all(col in df_cpu_sql.columns for col in required_columns):
+        
+        # Parse CPU Time column safely
         df_cpu_sql['CPU TIME (S)'] = pd.to_numeric(df_cpu_sql['CPU TIME (S)'], errors='coerce')
+
+        # Label: SQL ID with truncated SQL text
         df_cpu_sql['SQL_ID'] = df_cpu_sql['SQL ID'].astype(str) + " | " + df_cpu_sql['SQL TEXT'].str.slice(0, 50) + '...'
 
+        # Improved Bar Chart with Darker Blue Gradient
         fig_cpu = px.bar(
-            df_cpu_sql,
+            df_cpu_sql.sort_values('CPU TIME (S)'),
             y='SQL_ID',
             x='CPU TIME (S)',
             orientation='h',
             text='CPU TIME (S)',
-            title='Top 5 SQL by CPU Time',
+            title='Top SQL by CPU Time',
             color='CPU TIME (S)',
-            color_continuous_scale='blues'
+            color_continuous_scale=["#00008B", "#0000CD", "#4169E1", "#6495ED", "#87CEFA"]  # Dark to light blues
         )
+
         fig_cpu.update_layout(
             yaxis_title="SQL ID | SQL Text",
             xaxis_title="CPU Time (s)",
@@ -722,12 +759,34 @@ if not data['top_cpu_sql'].empty:
 else:
     st.warning("Top SQL by CPU Time not found.")
 
-# Initialization Parameters
-with st.expander("⚙️ Initialization Parameters"):
-    if not data.get('init_params', pd.DataFrame()).empty:
-        st.dataframe(data['init_params'], use_container_width=True, height=300)
-    else:
-        st.warning("Initialization Parameters section not found.")
+
+
+# Initialize session state to track expander open state
+if "sql_expander_open" not in st.session_state:
+    st.session_state.sql_expander_open = False
+
+if not data.get('full_sql_texts', pd.DataFrame()).empty:
+    df_sql_texts = data['full_sql_texts'].copy()
+
+    df_sql_texts.columns = df_sql_texts.columns.str.strip().str.upper()
+    sql_ids = df_sql_texts['SQL ID'].dropna().unique().tolist()
+
+    # Expander, controlled by session state
+    with st.expander("🔽 Click to View Full SQL Text by SQL ID", expanded=st.session_state.sql_expander_open):
+        selected_sql_id = st.selectbox("Select SQL ID to view full SQL Text:", sql_ids, key="sql_dropdown")
+
+        selected_row = df_sql_texts[df_sql_texts['SQL ID'] == selected_sql_id]
+
+        if not selected_row.empty:
+            st.session_state.sql_expander_open = True  # Keep expander open after selection
+            st.code(selected_row.iloc[0]['SQL TEXT'], language='sql')
+        else:
+            st.warning("SQL Text not found for the selected SQL ID.")
+
+else:
+    st.info("Complete List of SQL Text not found in AWR report.")
+
+
 
 
 
@@ -1068,7 +1127,6 @@ if not ash_df.empty and 'Event' in ash_df.columns:
     )
 
 # All sections
-# All sections
 report_dict = {
     # ✅ Environment Info comes first
     'Environment_Info': pd.DataFrame({
@@ -1097,9 +1155,11 @@ report_dict = {
     'Segments_Physical_Reads': data['seg_physical_reads'],
     'Segments_Row_Lock_Waits': data['seg_row_lock_waits'],
     'Top_SQL_Events': data['top_sql_events'],
-    'Activity_Over_Time': data['activity_over_time']
-}
+    'Activity_Over_Time': data['activity_over_time'],
 
+    # ✅ Add Full SQL Texts Section
+    'Complete_SQL_Texts': data['full_sql_texts'] if not data.get('full_sql_texts', pd.DataFrame()).empty else pd.DataFrame()
+}
 
 
 
@@ -1170,15 +1230,22 @@ pdf_content += f"\nEnd Snap Time:      {data['end_snap_time']}"
 
 pdf_content += df_to_text(data['load_profile'], "📊 Load Profile (Per Second)")
 pdf_content += df_to_text(data['wait_events'], "⏳ Top Wait Events (% DB Time)")
-pdf_content += df_to_text(data['top_sql'], "🔥 Top 5 SQL by Elapsed Time")
-pdf_content += df_to_text(data['top_cpu_sql'], "⚡ Top 5 SQL by CPU Time")
+pdf_content += df_to_text(data['top_sql'], "🔥 Top SQL by Elapsed Time")
+pdf_content += df_to_text(data['top_cpu_sql'], "⚡ Top SQL by CPU Time")
 pdf_content += df_to_text(data['init_params'], "⚙️ Initialization Parameters")
 pdf_content += df_to_text(data['pga_advisory'], "🧠 PGA Memory Advisory")
 pdf_content += df_to_text(data['sga_advisory'], "💡 SGA Target Advisory")
 pdf_content += df_to_text(data['seg_physical_reads'], "🥧 Segments by Physical Reads")
-pdf_content += df_to_text(data['seg_row_lock_waits'], "🔒 Segments by Row Lock Waits")  # ✅ Added Row Lock Waits
-pdf_content += df_to_text(data['top_sql_events'], "📝 Top SQL with Top Events")  # ✅ Top SQL Events Added
-pdf_content += df_to_text(data['activity_over_time'], "📊 Activity Over Time Breakdown")  # ✅ New Activity Over Time Section Added
+pdf_content += df_to_text(data['seg_row_lock_waits'], "🔒 Segments by Row Lock Waits")
+pdf_content += df_to_text(data['top_sql_events'], "📝 Top SQL with Top Events")
+pdf_content += df_to_text(data['activity_over_time'], "📊 Activity Over Time Breakdown")
+
+# ✅ Add Complete List of SQL Text Section
+if not data.get('full_sql_texts', pd.DataFrame()).empty:
+    pdf_content += "\n\n📄 Complete List of SQL Text\n" + "-" * 30
+    for _, row in data['full_sql_texts'].iterrows():
+        pdf_content += f"\n\nSQL ID: {row['SQL ID']}\nSQL Text:\n{row['SQL TEXT']}\n"
+
 
 
 
