@@ -680,37 +680,47 @@ if not data['top_sql'].empty:
     # Required columns
     required_columns = ['SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)']
     if all(col in df_top_sql.columns for col in required_columns):
-        
+
         # Parse elapsed time
         df_top_sql['ELAPSED TIME (S)'] = pd.to_numeric(df_top_sql['ELAPSED TIME (S)'], errors='coerce')
 
-        # Create label as SQL_ID | truncated SQL_TEXT
-        df_top_sql['SQL_ID'] = df_top_sql['SQL ID'].astype(str) + " | " + df_top_sql['SQL TEXT'].astype(str).str.slice(0, 50) + '...'
+        # Create a unique label for Y-axis
+        df_top_sql['LABEL'] = df_top_sql['SQL ID'].astype(str) + " | " + df_top_sql['SQL TEXT'].astype(str).str.slice(0, 50) + '...'
 
         # Plot with improved dark red gradient
         fig_elapsed = px.bar(
             df_top_sql.sort_values('ELAPSED TIME (S)'),
-            y='SQL_ID',
+            y='LABEL',
             x='ELAPSED TIME (S)',
             orientation='h',
             text='ELAPSED TIME (S)',
             title='Top SQL by Elapsed Time',
             color='ELAPSED TIME (S)',
-            color_continuous_scale=["#800000", "#B22222", "#DC143C", "#FF6347"]  # Dark to lighter reds
+            color_continuous_scale=["#800000", "#B22222", "#DC143C", "#FF6347"]
         )
 
         fig_elapsed.update_layout(
             yaxis_title="SQL ID | SQL Text",
             xaxis_title="Elapsed Time (s)",
             plot_bgcolor='#fffaf0',
-            margin=dict(l=10, r=10, t=40, b=10)
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=40 * len(df_top_sql),   # Ensure enough height per bar
+            uniformtext_mode='show'        # Force labels to render
         )
-        fig_elapsed.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+
+        fig_elapsed.update_traces(
+            texttemplate='%{text:.2f}',
+            textposition='outside',
+            hovertemplate="<b>Elapsed Time (s):</b> %{x}<br><b>SQL:</b> %{y}<extra></extra>"
+        )
+
         st.plotly_chart(fig_elapsed, use_container_width=True)
+
     else:
         st.error("Required columns ('SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)') not found in Top SQL by Elapsed Time data.")
 else:
     st.warning("Top SQL by Elapsed Time not found.")
+
 
 
 
@@ -727,37 +737,47 @@ if not data['top_cpu_sql'].empty:
     # Required columns
     required_columns = ['SQL ID', 'SQL TEXT', 'CPU TIME (S)']
     if all(col in df_cpu_sql.columns for col in required_columns):
-        
+
         # Parse CPU Time column safely
         df_cpu_sql['CPU TIME (S)'] = pd.to_numeric(df_cpu_sql['CPU TIME (S)'], errors='coerce')
 
         # Label: SQL ID with truncated SQL text
-        df_cpu_sql['SQL_ID'] = df_cpu_sql['SQL ID'].astype(str) + " | " + df_cpu_sql['SQL TEXT'].str.slice(0, 50) + '...'
+        df_cpu_sql['LABEL'] = df_cpu_sql['SQL ID'].astype(str) + " | " + df_cpu_sql['SQL TEXT'].str.slice(0, 50) + '...'
 
         # Improved Bar Chart with Darker Blue Gradient
         fig_cpu = px.bar(
             df_cpu_sql.sort_values('CPU TIME (S)'),
-            y='SQL_ID',
+            y='LABEL',
             x='CPU TIME (S)',
             orientation='h',
             text='CPU TIME (S)',
             title='Top SQL by CPU Time',
             color='CPU TIME (S)',
-            color_continuous_scale=["#00008B", "#0000CD", "#4169E1", "#6495ED", "#87CEFA"]  # Dark to light blues
+            color_continuous_scale=["#00008B", "#0000CD", "#4169E1", "#6495ED", "#87CEFA"]
         )
 
         fig_cpu.update_layout(
             yaxis_title="SQL ID | SQL Text",
             xaxis_title="CPU Time (s)",
             plot_bgcolor='#f8ffff',
-            margin=dict(l=10, r=10, t=40, b=10)
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=40 * len(df_cpu_sql),   # Ensure enough height per bar
+            uniformtext_mode='show'        # Force labels to render
         )
-        fig_cpu.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+
+        fig_cpu.update_traces(
+            texttemplate='%{text:.2f}',
+            textposition='outside',
+            hovertemplate="<b>CPU Time (s):</b> %{x}<br><b>SQL:</b> %{y}<extra></extra>"
+        )
+
         st.plotly_chart(fig_cpu, use_container_width=True)
+
     else:
         st.error("Required columns ('SQL ID', 'SQL TEXT', 'CPU TIME (S)') not found in Top SQL by CPU Time data.")
 else:
     st.warning("Top SQL by CPU Time not found.")
+
 
 
 
@@ -787,6 +807,11 @@ else:
     st.info("Complete List of SQL Text not found in AWR report.")
 
 
+with st.expander("⚙️ Initialization Parameters", expanded=False):
+    if not data['init_params'].empty:
+        st.dataframe(data['init_params'], use_container_width=True)
+    else:
+        st.warning("Initialization Parameters section not found.")
 
 
 
