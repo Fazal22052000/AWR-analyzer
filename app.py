@@ -11,7 +11,8 @@ from io import BytesIO
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
 # Dark mode toggle
-dark_mode = st.sidebar.checkbox("🌙 Dark Mode", value=False)
+dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+
 
 if dark_mode:
     st.markdown("""
@@ -542,9 +543,7 @@ if len(uploaded_files) >= 2:
         st.info(f"Selected Reports: **{st.session_state.compare_files[0]}** and **{st.session_state.compare_files[1]}**")
 
     if len(st.session_state.compare_files) == 2:
-        # Proceed with comparison logic...
-
-
+        # Proceed with comparison logic
         data_1, data_2 = None, None
 
         for uploaded in uploaded_files:
@@ -558,24 +557,39 @@ if len(uploaded_files) >= 2:
         if data_1 and data_2:
             st.success(f"Comparing **{st.session_state.compare_files[0]}** vs **{st.session_state.compare_files[1]}**")
 
+            # --- Updated Environment Info Section ---
             st.markdown("### 🛠️ Environment Info Comparison")
             col1, col2 = st.columns(2)
+
             with col1:
-                st.write(f"**{st.session_state.compare_files[0]}**")
+                st.write(f"**📄 Report:** {st.session_state.compare_files[0]}")
                 st.write(f"**DB Name:** {data_1['db_name']}")
+                st.write(f"**Instance Name:** {data_1['instance_name']}")
+                st.write(f"**Instance Number:** {data_1['instance_num']}")
+                st.write(f"**Startup Time:** {data_1['startup_time']}")
+                st.write(f"**Edition / Release:** {data_1['edition']}")
+                st.write(f"**RAC Status:** {data_1['rac_status']}")
+                st.write(f"**CDB Status:** {data_1['cdb_status']}")
                 st.write(f"**Total CPUs:** {data_1['total_cpu']}")
                 st.write(f"**Memory (GB):** {data_1['memory_gb']}")
                 st.write(f"**Platform:** {data_1['platform']}")
-                st.write(f"**Begin Snap:** {data_1['begin_snap_time']}")
-                st.write(f"**End Snap:** {data_1['end_snap_time']}")
+                st.write(f"**Begin Snap Time:** {data_1['begin_snap_time']}")
+                st.write(f"**End Snap Time:** {data_1['end_snap_time']}")
+
             with col2:
-                st.write(f"**{st.session_state.compare_files[1]}**")
+                st.write(f"**📄 Report:** {st.session_state.compare_files[1]}")
                 st.write(f"**DB Name:** {data_2['db_name']}")
+                st.write(f"**Instance Name:** {data_2['instance_name']}")
+                st.write(f"**Instance Number:** {data_2['instance_num']}")
+                st.write(f"**Startup Time:** {data_2['startup_time']}")
+                st.write(f"**Edition / Release:** {data_2['edition']}")
+                st.write(f"**RAC Status:** {data_2['rac_status']}")
+                st.write(f"**CDB Status:** {data_2['cdb_status']}")
                 st.write(f"**Total CPUs:** {data_2['total_cpu']}")
                 st.write(f"**Memory (GB):** {data_2['memory_gb']}")
                 st.write(f"**Platform:** {data_2['platform']}")
-                st.write(f"**Begin Snap:** {data_2['begin_snap_time']}")
-                st.write(f"**End Snap:** {data_2['end_snap_time']}")
+                st.write(f"**Begin Snap Time:** {data_2['begin_snap_time']}")
+                st.write(f"**End Snap Time:** {data_2['end_snap_time']}")
 
             # Section Comparisons
             sections = [
@@ -597,10 +611,17 @@ if len(uploaded_files) >= 2:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**{st.session_state.compare_files[0]} {title}**")
-                    st.dataframe(data_1[key], use_container_width=True)
+                    if key in data_1 and not data_1[key].empty:
+                        st.dataframe(data_1[key], use_container_width=True)
+                    else:
+                        st.warning("No data found.")
                 with col2:
                     st.write(f"**{st.session_state.compare_files[1]} {title}**")
-                    st.dataframe(data_2[key], use_container_width=True)
+                    if key in data_2 and not data_2[key].empty:
+                        st.dataframe(data_2[key], use_container_width=True)
+                    else:
+                        st.warning("No data found.")
+
 
 
 
@@ -645,7 +666,23 @@ st.markdown("""
 
 
 
-
+# ✅ Jump to Section (Full Navigation)
+st.markdown("""
+### 🧭 Jump to Section
+- [🛠️ AWR Info](#awr-environment-info)
+- [📊 Load Profile](#load-profile)
+- [⏳ Wait Events](#top-5-wait-events-db-time)
+- [🔥 Top SQL by Elapsed Time](#top-sql-by-elapsed-time)
+- [⚡ Top SQL by CPU Time](#top-sql-by-cpu-time)
+- [📄 Complete SQL Texts](#complete-sql-texts)
+- [⚙️ Init Parameters](#initialization-parameters)
+- [🥧 Segments by Physical Reads](#segments-by-physical-reads)
+- [🔒 Segments by Row Lock Waits](#segments-by-row-lock-waits)
+- [🧠 PGA Advisory](#advisory-statistics--pga-advisory)
+- [💡 SGA Advisory](#sga-target-advisory)
+- [📝 SQL Events](#top-sql-with-top-events)
+- [📊 Activity Timeline](#activity-over-time)
+""", unsafe_allow_html=True)
 
 
 # Load Profile
@@ -781,358 +818,184 @@ else:
 
 
 
+# ✅ FULLY FIXED Scroll-Aware Anchors + Expanders
+# These changes ensure TOC jumps work AND expanders remain clickable in Streamlit
+
 # Initialize session state to track expander open state
 if "sql_expander_open" not in st.session_state:
     st.session_state.sql_expander_open = False
 
 if not data.get('full_sql_texts', pd.DataFrame()).empty:
     df_sql_texts = data['full_sql_texts'].copy()
-
     df_sql_texts.columns = df_sql_texts.columns.str.strip().str.upper()
     sql_ids = df_sql_texts['SQL ID'].dropna().unique().tolist()
 
-    # Expander, controlled by session state
+    st.markdown('<div id="complete-sql-texts"></div>', unsafe_allow_html=True)
+    st.write("")
+
     with st.expander("🔽 Click to View Full SQL Text by SQL ID", expanded=st.session_state.sql_expander_open):
         selected_sql_id = st.selectbox("Select SQL ID to view full SQL Text:", sql_ids, key="sql_dropdown")
-
         selected_row = df_sql_texts[df_sql_texts['SQL ID'] == selected_sql_id]
 
         if not selected_row.empty:
-            st.session_state.sql_expander_open = True  # Keep expander open after selection
+            st.session_state.sql_expander_open = True
             st.code(selected_row.iloc[0]['SQL TEXT'], language='sql')
         else:
             st.warning("SQL Text not found for the selected SQL ID.")
-
 else:
     st.info("Complete List of SQL Text not found in AWR report.")
 
-
+# Initialization Parameters
+st.markdown('<div id="initialization-parameters"></div>', unsafe_allow_html=True)
+st.write("")
 with st.expander("⚙️ Initialization Parameters", expanded=False):
     if not data['init_params'].empty:
         st.dataframe(data['init_params'], use_container_width=True)
     else:
         st.warning("Initialization Parameters section not found.")
 
-
-
-with st.expander("📊 Segments by Physical Reads"):
+# Segments by Physical Reads
+st.markdown('<div id="segments-by-physical-reads"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📊 Segments by Physical Reads", expanded=False):
     if not data['seg_physical_reads'].empty:
-
         chart_df = data['seg_physical_reads'].copy()
-
-        # Clean and convert 'Physical Reads' column
         chart_df['Physical Reads'] = chart_df['Physical Reads'].replace(',', '', regex=True)
         chart_df['Physical Reads'] = pd.to_numeric(chart_df['Physical Reads'], errors='coerce')
-
         fig = px.bar(
             chart_df.sort_values(by='Physical Reads', ascending=False).head(10),
-            x='Object Name',               # Categories on X-axis
-            y='Physical Reads',            # Numeric values on Y-axis
+            x='Object Name',
+            y='Physical Reads',
             text='Physical Reads',
-            color_discrete_sequence=["#3498db"]  # Blue bars, can change color
+            color_discrete_sequence=["#3498db"]
         )
-
         fig.update_traces(textposition='outside')
-
-        fig.update_layout(
-            title="Top 10 Segments by Physical Reads",
-            xaxis_title="Object Name",
-            yaxis_title="Physical Reads",
-            plot_bgcolor="#f8f9fa",
-            paper_bgcolor="#ffffff",
-            showlegend=False
-        )
-
-        fig.update_xaxes(tickangle=-45)  # Rotate x-axis labels for readability
-
+        fig.update_layout(title="Top 10 Segments by Physical Reads", xaxis_title="Object Name", yaxis_title="Physical Reads",
+                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_xaxes(tickangle=-45)
         st.plotly_chart(fig, use_container_width=True)
-
     else:
         st.warning("Segments by Physical Reads section not found.")
 
-
-with st.expander("📊 Segments by Row Lock Waits"):
+# Segments by Row Lock Waits
+st.markdown('<div id="segments-by-row-lock-waits"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📊 Segments by Row Lock Waits", expanded=False):
     if not data['seg_row_lock_waits'].empty:
-
         chart_df = data['seg_row_lock_waits'].copy()
-
-        # Clean and convert 'Row Lock Waits' column to numeric
         chart_df['Row Lock Waits'] = chart_df['Row Lock Waits'].replace(',', '', regex=True)
         chart_df['Row Lock Waits'] = pd.to_numeric(chart_df['Row Lock Waits'], errors='coerce')
-
         fig = px.bar(
-            chart_df.sort_values(by='Row Lock Waits', ascending=False).head(10),  # Top 10 segments
-            x='Object Name',
-            y='Row Lock Waits',
-            text='Row Lock Waits',
-            color_discrete_sequence=["#3498db"]  # Blue bars, change if desired
+            chart_df.sort_values(by='Row Lock Waits', ascending=False).head(10),
+            x='Object Name', y='Row Lock Waits', text='Row Lock Waits', color_discrete_sequence=["#3498db"]
         )
-
         fig.update_traces(textposition='outside')
-
-        fig.update_layout(
-            title="Top Segments by Row Lock Waits",
-            xaxis_title="Object Name",
-            yaxis_title="Row Lock Waits",
-            plot_bgcolor="#f8f9fa",
-            paper_bgcolor="#ffffff",
-            showlegend=False
-        )
-
-        fig.update_xaxes(tickangle=-45)  # Rotate x-axis labels for readability
-
+        fig.update_layout(title="Top Segments by Row Lock Waits", xaxis_title="Object Name", yaxis_title="Row Lock Waits",
+                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_xaxes(tickangle=-45)
         st.plotly_chart(fig, use_container_width=True)
-
     else:
         st.warning("Segments by Row Lock Waits section not found.")
 
-
-
-
-
-
-
-
-with st.expander("📈 Advisory Statistics – PGA Advisory", expanded=False):
+# PGA Advisory
+st.markdown('<div id="advisory-statistics--pga-advisory"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📈 Advisory Statistics – PGA Advisory", expanded=False):
     if data.get('pga_advisory') is not None and not data['pga_advisory'].empty:
-        df = data['pga_advisory'][[
-            'PGA Target Est (MB)',
-            'Size Factr',
-            'Estd Time'
-        ]].copy()
-
-        # Clean & convert
-        df['PGA Target Est (MB)'] = (
-            df['PGA Target Est (MB)']
-            .replace(',', '', regex=True)
-            .astype(float)
-        )
+        df = data['pga_advisory'][['PGA Target Est (MB)', 'Size Factr', 'Estd Time']].copy()
+        df['PGA Target Est (MB)'] = df['PGA Target Est (MB)'].replace(',', '', regex=True).astype(float)
         df['Size Factr'] = df['Size Factr'].astype(str)
-        df['Estd Time'] = (
-            df['Estd Time']
-            .replace(',', '', regex=True)
-            .astype(float)
-        )
-
-        # Build the pie chart
-        fig = go.Figure(go.Pie(
-            labels=df['PGA Target Est (MB)'],
-            values=df['Estd Time'],
-            text=df['Size Factr'],             # show only Size Factor inside
-            textinfo='text',
-            textposition='inside',
-            marker=dict(line=dict(color='#000000', width=1)),
-            hovertemplate=(
-                "<b>PGA Target Est (MB):</b> %{label}<br>"
-                "<b>Estd Time:</b> %{value}<extra></extra>"
-            )
-        ))
-
-        fig.update_layout(
-            title="PGA Advisory – Estd Time by PGA Target Est (MB)",
-            showlegend=False,
-            template='plotly_dark',
-            margin=dict(t=50, b=0, l=0, r=0)
-        )
-
-        # Two‑column layout
+        df['Estd Time'] = df['Estd Time'].replace(',', '', regex=True).astype(float)
+        fig = go.Figure(go.Pie(labels=df['PGA Target Est (MB)'], values=df['Estd Time'], text=df['Size Factr'],
+                               textinfo='text', textposition='inside', marker=dict(line=dict(color='#000000', width=1)),
+                               hovertemplate="<b>PGA Target Est (MB):</b> %{label}<br><b>Estd Time:</b> %{value}<extra></extra>"))
+        fig.update_layout(title="PGA Advisory – Estd Time by PGA Target Est (MB)", showlegend=False,
+                          template='plotly_dark', margin=dict(t=50, b=0, l=0, r=0))
         chart_col, info_col = st.columns([3, 1])
-
         with chart_col:
             st.plotly_chart(fig, use_container_width=True)
-
         with info_col:
-            st.info(
-                "**How to Read**\n\n"
-                "- **Each slice** = `PGA Target Est (MB)`\n"
-                "- **Slice size** = `Estd Time`\n"
-                "- **Inside label** = `Size Factr`\n"
-                "- **Hover shows**: PGA Target Est (MB), Estd Time"
-            )
-
+            st.info("**How to Read**\n\n- **Each slice** = `PGA Target Est (MB)`\n- **Slice size** = `Estd Time`\n- **Inside label** = `Size Factr`\n- **Hover shows**: PGA Target Est (MB), Estd Time")
     else:
         st.info("PGA Memory Advisory data not found.")
 
-
-
-# === SGA Target Advisory Section ===
-
+# SGA Advisory
+st.markdown('<div id="sga-target-advisory"></div>', unsafe_allow_html=True)
+st.write("")
 with st.expander("▶️ SGA Target Advisory", expanded=False):
     st.markdown("#### SGA Target Advisory")
-
     if data.get('sga_advisory') is not None and not data['sga_advisory'].empty:
         sga_df = data['sga_advisory'].copy()
-        # Clean column names & types
         sga_df.columns = [str(c).strip() for c in sga_df.columns]
         for col in ['SGA Target Size (M)', 'SGA Size Factor', 'Est DB Time (s)', 'Est Physical Reads']:
-            sga_df[col] = (
-                sga_df[col]
-                .replace(',', '', regex=True)
-                .astype(float)
-            )
-
-        # Build the pie chart
-        fig = px.pie(
-            sga_df,
-            values='Est DB Time (s)',
-            names='SGA Target Size (M)',
-            hover_data=['SGA Target Size (M)', 'Est DB Time (s)', 'Est Physical Reads'],
-        )
-        fig.update_traces(
-            text=sga_df['SGA Size Factor'].astype(str),
-            textposition='inside',
-            textinfo='text',
-            hovertemplate=(
-                "SGA Target Size (M): %{label}<br>"
-                "Est DB Time (s): %{value}<br>"
-                "Est Physical Reads: %{customdata[0]}<extra></extra>"
-            ),
-            customdata=sga_df[['Est Physical Reads']],
-            showlegend=False
-        )
-        fig.update_layout(
-            title='Estimated DB Time vs SGA Target Size Advisory',
-            uniformtext_minsize=12,
-            uniformtext_mode='hide',
-            margin=dict(t=40, b=0, l=0, r=0)
-        )
-
-        # Two‑column layout: chart on left, instructions on right
+            sga_df[col] = sga_df[col].replace(',', '', regex=True).astype(float)
+        fig = px.pie(sga_df, values='Est DB Time (s)', names='SGA Target Size (M)',
+                     hover_data=['SGA Target Size (M)', 'Est DB Time (s)', 'Est Physical Reads'])
+        fig.update_traces(text=sga_df['SGA Size Factor'].astype(str), textposition='inside', textinfo='text',
+                          hovertemplate=("SGA Target Size (M): %{label}<br>Est DB Time (s): %{value}<br>Est Physical Reads: %{customdata[0]}<extra></extra>"),
+                          customdata=sga_df[['Est Physical Reads']], showlegend=False)
+        fig.update_layout(title='Estimated DB Time vs SGA Target Size Advisory', uniformtext_minsize=12,
+                          uniformtext_mode='hide', margin=dict(t=40, b=0, l=0, r=0))
         col1, col2 = st.columns([3, 1])
         with col1:
             st.plotly_chart(fig, use_container_width=True)
         with col2:
-            st.info(
-                "**How to Read**\n\n"
-                "- Each slice = SGA Target Size (M)\n"
-                "- Slice size = Est DB Time (s)\n"
-                "- Inside label = Size Factor\n"
-                "- Hover shows:\n"
-                "  • SGA Target Size (M)\n"
-                "  • Est DB Time (s)\n"
-                "  • Est Physical Reads"
-            )
-
+            st.info("**How to Read**\n\n- Each slice = SGA Target Size (M)\n- Slice size = Est DB Time (s)\n- Inside label = Size Factor\n- Hover shows:\n  • SGA Target Size (M)\n  • Est DB Time (s)\n  • Est Physical Reads")
     else:
         st.warning("SGA Target Advisory section not found or empty.")
 
-
-with st.expander("📝 Top SQL with Top Events"):
+# Top SQL with Top Events
+st.markdown('<div id="top-sql-with-top-events"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📝 Top SQL with Top Events", expanded=False):
     if not data['top_sql_events'].empty:
-
         chart_df = data['top_sql_events'].copy()
-
-        # Rename columns to standard format
         chart_df.rename(columns={
-            'SQL ID': 'sql_id',
-            'Plan Hash': 'plan_hash',
-            'Executions': 'executions',
-            'Event': 'event',
-            'Top Row Source': 'top_row_source',
-            'SQL Text': 'sql_text'
+            'SQL ID': 'sql_id', 'Plan Hash': 'plan_hash', 'Executions': 'executions',
+            'Event': 'event', 'Top Row Source': 'top_row_source', 'SQL Text': 'sql_text'
         }, inplace=True)
-
-        # Keep only required columns
         chart_df = chart_df[['sql_id', 'plan_hash', 'executions', 'event', 'top_row_source', 'sql_text']]
-
-        # Replace NaNs with empty strings and strip whitespace
         chart_df = chart_df.fillna('').astype(str).apply(lambda x: x.str.strip())
-
-        # Remove blank rows based on key columns
-        chart_df = chart_df[
-            (chart_df['sql_id'] != '') &
-            (chart_df['plan_hash'] != '') &
-            (chart_df['executions'] != '') &
-            (chart_df['sql_text'] != '')
-        ]
-
-        # Convert numeric columns safely
+        chart_df = chart_df[(chart_df['sql_id'] != '') & (chart_df['plan_hash'] != '') &
+                            (chart_df['executions'] != '') & (chart_df['sql_text'] != '')]
         chart_df['executions'] = pd.to_numeric(chart_df['executions'], errors='coerce').fillna(0).astype(int)
         chart_df['plan_hash'] = pd.to_numeric(chart_df['plan_hash'], errors='coerce').fillna(0).astype(int)
-
-        # Sort by executions
         chart_df.sort_values(by='executions', ascending=False, inplace=True)
-
-        # Limit to top 6 rows
-        chart_df = chart_df.head(6)
-
-        # Reset index
-        chart_df.reset_index(drop=True, inplace=True)
-
+        chart_df = chart_df.head(6).reset_index(drop=True)
         if not chart_df.empty:
-            # Horizontal Bar Chart with Custom Hover
-            fig = px.bar(
-                chart_df,
-                x='executions',
-                y='sql_id',
-                orientation='h',
-                text='executions',
-                title='Top SQL with Top Events - Executions',
-                color='event',
-                hover_data={'sql_id': False, 'top_row_source': True, 'executions': True, 'event': True}
-            )
-            fig.update_layout(
-                yaxis_title='SQL ID',
-                xaxis_title='Executions',
-                height=400
-            )
+            fig = px.bar(chart_df, x='executions', y='sql_id', orientation='h', text='executions',
+                         title='Top SQL with Top Events - Executions', color='event',
+                         hover_data={'sql_id': False, 'top_row_source': True, 'executions': True, 'event': True})
+            fig.update_layout(yaxis_title='SQL ID', xaxis_title='Executions', height=400)
             st.plotly_chart(fig, use_container_width=True)
-            
         else:
             st.info("No valid rows found after filtering.")
-
     else:
         st.warning("Top SQL with Top Events section not found.")
 
-
-with st.expander("📊 Activity Over Time"):
+# Activity Over Time
+st.markdown('<div id="activity-over-time"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📊 Activity Over Time", expanded=False):
     if not data['activity_over_time'].empty:
-
         chart_df = data['activity_over_time'].copy()
-
-        # Keep only the required columns and rename for consistency
         chart_df.rename(columns={
-            'Slot Time (Duration)': 'slot_time',
-            'Event': 'event',
-            'Event Count': 'event_count',
-            '% Event': 'percent_event'
+            'Slot Time (Duration)': 'slot_time', 'Event': 'event', 'Event Count': 'event_count', '% Event': 'percent_event'
         }, inplace=True)
-
         chart_df = chart_df[['slot_time', 'event', 'event_count', 'percent_event']]
-
-        # Clean and convert columns
         chart_df = chart_df.fillna('').astype(str).apply(lambda x: x.str.strip())
         chart_df['event_count'] = pd.to_numeric(chart_df['event_count'], errors='coerce').fillna(0).astype(int)
         chart_df['percent_event'] = pd.to_numeric(chart_df['percent_event'], errors='coerce').fillna(0)
-
-        # Filter out invalid event counts
         chart_df = chart_df[chart_df['event_count'] > 0]
-
         if not chart_df.empty:
-            # Bar chart: Event Count by Slot Time and Event
-            fig = px.bar(
-                chart_df,
-                x='slot_time',
-                y='event_count',
-                color='event',
-                text='event_count',
-                title='Activity Over Time - Event Count by Slot Time and Event',
-            )
-            fig.update_layout(
-                xaxis_title='Slot Time (Duration)',
-                yaxis_title='Event Count',
-                height=450,
-                barmode='stack'  # Options: 'stack', 'group', 'overlay', 'relative'
-            )
+            fig = px.bar(chart_df, x='slot_time', y='event_count', color='event', text='event_count',
+                         title='Activity Over Time - Event Count by Slot Time and Event')
+            fig.update_layout(xaxis_title='Slot Time (Duration)', yaxis_title='Event Count', height=450, barmode='stack')
             st.plotly_chart(fig, use_container_width=True)
-
         else:
             st.info("No valid Event data found for Activity Over Time.")
-
     else:
         st.warning("Activity Over Time section not found.")
-
-
 
 
 
