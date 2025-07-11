@@ -668,7 +668,7 @@ st.markdown("""
 
 # ✅ Jump to Section (Full Navigation)
 st.markdown("""
-### 🧭 Jump to Section
+### 🧭 Main Report
 - [🛠️ AWR Info](#awr-environment-info)
 - [📊 Load Profile](#load-profile)
 - [⏳ Wait Events](#top-5-wait-events-db-time)
