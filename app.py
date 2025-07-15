@@ -6,12 +6,27 @@ import base64
 import plotly.graph_objects as go
 import plotly.express as px
 from io import BytesIO
+from auth import ENABLE_AUTH, login, logout
+
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
+# 🔐 Optional Authentication
+from auth import ENABLE_AUTH, login, logout
+
+if ENABLE_AUTH:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        login()
+
 # Dark mode toggle
 dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+
+if ENABLE_AUTH and st.session_state.authenticated:
+    logout()
+
 
 
 if dark_mode:
@@ -166,6 +181,7 @@ def parse_awr(html):
 
     # Default values for other fields
     db_name = "N/A"
+    db_time_value = "N/A"
     snap_time = "N/A"
     cdb_status = "N/A"
     memory_gb = "N/A"
@@ -219,6 +235,14 @@ def parse_awr(html):
                     idx_mem = lower_headers.index('memory (gb)')
                     mem_val = str(df.iloc[0, idx_mem]).strip()
                     memory_gb = mem_val if mem_val else "N/A"
+                except:
+                    pass
+
+            # Extract DB Time (s) from Load Profile
+                db_time_value = "N/A"
+                try:
+                    db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
+                    db_time_value = db_time_row['Per Second'].values[0]
                 except:
                     pass
 
@@ -491,6 +515,81 @@ def parse_awr(html):
         'full_sql_texts': full_sql_text_df
     }
 
+
+# --- Add this BELOW your parse_awr() function ---
+
+def get_intelligent_insights(data):
+    insights = []
+
+
+
+
+    # Rule: High DB Time per second
+    if not data['load_profile'].empty:
+        try:
+            db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
+            db_time = float(db_time_row['Per Second'].values[0])
+
+            if db_time > 45.0:  # You can change this threshold
+                insights.append(f"⚠️ High Avg Active Session detected: {db_time:.2f} — indicates significant load on the database.")
+        except:
+            pass
+
+
+    # Rule: Suboptimal SGA
+    if not data['sga_advisory'].empty:
+        sga_df = data['sga_advisory'].copy()
+        try:
+            sga_df['Est DB Time (s)'] = pd.to_numeric(sga_df['Est DB Time (s)'].replace(',', '', regex=True), errors='coerce')
+            min_est_time = sga_df['Est DB Time (s)'].min()
+            current_est_time = sga_df.iloc[len(sga_df)//2]['Est DB Time (s)']
+            if float(current_est_time) - min_est_time > 10:
+                insights.append("💡 SGA Advisory suggests increasing SGA size could reduce estimated DB time.")
+        except:
+            pass
+     
+
+        # Rule: Detect specific contention events (enq: TX and enq: TM)
+    if not data['wait_events'].empty:
+        try:
+            df = data['wait_events'].copy()
+            df.columns = df.columns.str.strip()
+            df['% DB time'] = pd.to_numeric(df['% DB time'], errors='coerce')
+            df['Event'] = df['Event'].astype(str)
+
+            tx_tm_events = df[
+                df['Event'].str.lower().isin(['enq: tx - row lock contention', 'enq: tm - contention'])
+                & (df['% DB time'] > 1)  # Only if it's significant
+            ]
+
+            if not tx_tm_events.empty:
+                listed = ', '.join(tx_tm_events['Event'])
+                insights.append(f"🚨 Contention detected: {listed} — consider investigating blocking sessions or DML concurrency.")
+        except:
+            pass
+
+
+     # Rule: Suboptimal PGA
+    if not data['pga_advisory'].empty:
+        try:
+            pga_df = data['pga_advisory'].copy()
+            pga_df.columns = pga_df.columns.str.strip()
+            pga_df['Estd Time'] = pd.to_numeric(pga_df['Estd Time'].replace(',', '', regex=True), errors='coerce')
+
+            current_row = pga_df.iloc[len(pga_df)//2]  # assume current PGA is near center
+            current_time = current_row['Estd Time']
+            min_time = pga_df['Estd Time'].min()
+
+            if current_time - min_time > 10:
+                insights.append("💡 PGA Advisory suggests increasing PGA size could reduce estimated execution time.")
+        except:
+            pass
+
+
+
+    return insights
+
+
 # Upload file - Main uploader
 uploaded_files = st.file_uploader("📤 Upload AWR HTML reports", type="html", accept_multiple_files=True, key="main_uploader")
 
@@ -511,6 +610,7 @@ for uploaded in uploaded_files:
         html = uploaded.getvalue().decode('utf-8')
         try:
             data = parse_awr(html)
+            insights = get_intelligent_insights(data)  # ✅ Add here
         except Exception as e:
             st.error(f"Error parsing AWR report: {e}")
             data = None
@@ -567,6 +667,7 @@ if len(uploaded_files) >= 2:
                 st.write(f"**Instance Name:** {data_1['instance_name']}")
                 st.write(f"**Instance Number:** {data_1['instance_num']}")
                 st.write(f"**Startup Time:** {data_1['startup_time']}")
+                st.write(f"**DB Time (s):** {data_1['load_profile'][data_1['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data_1['load_profile'].empty else 'N/A'}")
                 st.write(f"**Edition / Release:** {data_1['edition']}")
                 st.write(f"**RAC Status:** {data_1['rac_status']}")
                 st.write(f"**CDB Status:** {data_1['cdb_status']}")
@@ -582,6 +683,7 @@ if len(uploaded_files) >= 2:
                 st.write(f"**Instance Name:** {data_2['instance_name']}")
                 st.write(f"**Instance Number:** {data_2['instance_num']}")
                 st.write(f"**Startup Time:** {data_2['startup_time']}")
+                st.write(f"**DB Time (s):** {data_2['load_profile'][data_2['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data_2['load_profile'].empty else 'N/A'}")
                 st.write(f"**Edition / Release:** {data_2['edition']}")
                 st.write(f"**RAC Status:** {data_2['rac_status']}")
                 st.write(f"**CDB Status:** {data_2['cdb_status']}")
@@ -590,6 +692,7 @@ if len(uploaded_files) >= 2:
                 st.write(f"**Platform:** {data_2['platform']}")
                 st.write(f"**Begin Snap Time:** {data_2['begin_snap_time']}")
                 st.write(f"**End Snap Time:** {data_2['end_snap_time']}")
+
 
             # Section Comparisons
             sections = [
@@ -639,6 +742,7 @@ st.markdown("""
 </div>
 <div class="card-container">
     <div class="card"><h4>🖥️ Total CPUs</h4><p>{cpu}</p></div>
+    <div class="card"><h4>🕒 DB Time (s)</h4><p>{db_time}</p></div>
     <div class="card"><h4>🗃️ RAC Status</h4><p>{rac}</p></div>
     <div class="card"><h4>🔖 Edition/Release</h4><p>{edition}</p></div>
     <div class="card"><h4>💾 Memory (GB)</h4><p>{memory}</p></div>
@@ -652,6 +756,7 @@ st.markdown("""
 </div>
 """.format(
     cpu=data['total_cpu'],
+    db_time=data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A",
     rac=data['rac_status'],
     edition=data['edition'],
     memory=data['memory_gb'],
@@ -664,6 +769,14 @@ st.markdown("""
     startup=data['startup_time']
 ), unsafe_allow_html=True)
 
+
+# 🧠 Intelligent Insights
+st.markdown("### 🧠 Intelligent Insights")
+if insights:
+    for insight in insights:
+        st.success(insight)
+else:
+    st.info("✅ No major anomalies or tuning issues detected.")
 
 
 # ✅ Jump to Section (Full Navigation)
@@ -1019,6 +1132,8 @@ report_dict = {
     # ✅ Environment Info comes first
     'Environment_Info': pd.DataFrame({
         'Database Name':      [data['db_name']],
+        'DB Time (s)': [data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A"],
+
         'Instance':           [data['instance_name']],
         'Instance Number':    [data['instance_num']],
         'Startup Time':       [data['startup_time']],
@@ -1104,6 +1219,7 @@ pdf_content = f"""Oracle AWR Analyzer - Full Text Report
 # Add Environment Info to Text Report
 pdf_content += "\n\n🛠️ AWR Environment Info\n" + "-" * 30
 pdf_content += f"\nDatabase Name:      {data['db_name']}"
+pdf_content += f"\nDB Time (s):        {data['load_profile'][data['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data['load_profile'].empty else 'N/A'}"
 pdf_content += f"\nInstance:           {data['instance_name']}"
 pdf_content += f"\nInstance Number:    {data['instance_num']}"
 pdf_content += f"\nStartup Time:       {data['startup_time']}"
