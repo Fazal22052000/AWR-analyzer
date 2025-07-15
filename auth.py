@@ -1,34 +1,29 @@
 import streamlit as st
 import hashlib
 
-# Toggle authentication
+# Enable or disable authentication
 ENABLE_AUTH = True
 
-# Load USERS from Streamlit secrets
-try:
-    USERS = st.secrets["users"]
-except Exception:
-    USERS = {}
+# ✅ Load users from Streamlit secrets
+# Add in .streamlit/secrets.toml:
+# [users]
+# fazal = "c93f0b6f1384...SHA256..."
+USERS = st.secrets["users"]
 
 def check_login(username, password):
     """Verify if the username and password match."""
     hashed_pw = hashlib.sha256(password.encode()).hexdigest()
-
-    # 🔍 DEBUG LOGGING
-    st.write("🔐 DEBUG: Username entered:", username)
-    st.write("🔐 DEBUG: SHA-256 of entered password:", hashed_pw)
-    st.write("🔐 DEBUG: Stored hash from secrets:", USERS.get(username))
-
     return USERS.get(username) == hashed_pw
 
 def login():
-    """Modern, aligned login UI with blue theme and no scroll."""
+    """Modern, aligned login UI with rerun-safe session logic."""
     st.markdown("""
         <style>
         html, body, .main, .block-container {
             height: 100vh;
             overflow: hidden;
         }
+
         .login-wrapper {
             display: flex;
             justify-content: center;
@@ -37,6 +32,7 @@ def login():
             background: linear-gradient(135deg, #e0f2ff, #f8fbff);
             font-family: 'Segoe UI', sans-serif;
         }
+
         .login-card {
             background: #ffffff;
             border-radius: 12px;
@@ -46,41 +42,40 @@ def login():
             box-shadow: 0 8px 30px rgba(0,0,0,0.1);
             text-align: center;
         }
+
         .login-header {
             display: flex;
             flex-direction: column;
             align-items: center;
             margin-bottom: 25px;
         }
+
         .login-header .icon {
             font-size: 2rem;
             color: #1e3a8a;
             margin-bottom: 5px;
         }
+
         .login-header .title {
             font-size: 1.7rem;
             font-weight: 600;
             color: #1e3a8a;
             margin: 0;
         }
+
         .login-footer {
             text-align: center;
             font-size: 0.8rem;
             color: #777;
             margin-top: 25px;
         }
-        input[type="password"] {
+
+        input {
             border-radius: 6px !important;
-            padding: 10px 40px 10px 10px !important;
+            padding: 10px !important;
             font-size: 1rem !important;
-            box-sizing: border-box;
         }
-        [data-testid="stTextInput"] button {
-            position: absolute;
-            top: 50% !important;
-            transform: translateY(-50%) !important;
-            right: 10px !important;
-        }
+
         button {
             font-weight: 600;
             background-color: #1e3a8a !important;
@@ -98,10 +93,13 @@ def login():
             </div>
     """, unsafe_allow_html=True)
 
+    # Initialize login states
     if "login_failed" not in st.session_state:
         st.session_state.login_failed = False
     if "empty_fields" not in st.session_state:
         st.session_state.empty_fields = False
+    if "trigger_rerun" not in st.session_state:
+        st.session_state.trigger_rerun = False
 
     with st.form("login_form"):
         username = st.text_input("Username")
@@ -116,7 +114,7 @@ def login():
                 st.session_state.username = username
                 st.session_state.login_failed = False
                 st.session_state.empty_fields = False
-                st.rerun()
+                st.session_state.trigger_rerun = True
             else:
                 st.session_state.login_failed = True
                 st.session_state.empty_fields = False
@@ -132,13 +130,18 @@ def login():
         </div>
     """, unsafe_allow_html=True)
 
+    # ✅ Trigger rerun after successful login
+    if st.session_state.trigger_rerun:
+        st.session_state.trigger_rerun = False
+        st.rerun()
+
     st.stop()
 
 def logout():
-    """Styled logout panel in sidebar."""
+    """Sidebar logout panel."""
     with st.sidebar:
         st.markdown("---")
-        st.markdown(f"👤 **Logged in as:** `{st.session_state.username}`")
+        st.markdown("👤 **Logged in as:** `{}`".format(st.session_state.username))
         if st.button("🔓 Logout"):
             st.session_state.authenticated = False
             st.session_state.username = ""
