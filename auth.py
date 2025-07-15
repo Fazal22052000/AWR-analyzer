@@ -5,9 +5,6 @@ import hashlib
 ENABLE_AUTH = True
 
 # Load USERS from Streamlit secrets
-# Format in .streamlit/secrets.toml:
-# [users]
-# fazal = "5e8b94...hashed_pw"
 try:
     USERS = st.secrets["users"]
 except Exception:
@@ -16,6 +13,12 @@ except Exception:
 def check_login(username, password):
     """Verify if the username and password match."""
     hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+
+    # 🔍 DEBUG LOGGING
+    st.write("🔐 DEBUG: Username entered:", username)
+    st.write("🔐 DEBUG: SHA-256 of entered password:", hashed_pw)
+    st.write("🔐 DEBUG: Stored hash from secrets:", USERS.get(username))
+
     return USERS.get(username) == hashed_pw
 
 def login():
