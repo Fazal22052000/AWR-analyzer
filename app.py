@@ -11,11 +11,8 @@ from io import BytesIO
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
-
-
-
-    # 🌙 Dark mode toggle can go here inside authenticated block
-    dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+# 🌙 Dark mode toggle can go here inside authenticated block
+dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
 if dark_mode:
     st.markdown("""
