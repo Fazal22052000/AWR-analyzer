@@ -6,13 +6,31 @@ import base64
 import plotly.graph_objects as go
 import plotly.express as px
 from io import BytesIO
+from auth import ENABLE_AUTH, login, logout
+
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
-# Dark mode toggle
-dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+# 🔐 Optional Authentication
+from auth import ENABLE_AUTH, login, logout
 
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+
+# 🔐 Optional Authentication
+from auth import ENABLE_AUTH, login, logout
+
+if ENABLE_AUTH and not st.session_state.authenticated:
+    login()
+
+if not ENABLE_AUTH or st.session_state.authenticated:
+    logout()  # 👤 Show logout if logged in
+
+    # 🌙 Dark mode toggle can go here inside authenticated block
+    dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
 if dark_mode:
     st.markdown("""
@@ -585,8 +603,18 @@ if not uploaded_files:
 # Build list of file names
 file_names = [file.name for file in uploaded_files]
 
+
 # Select report to view
 selected_file = st.selectbox("Select an AWR report to view:", file_names, key="select_main_report")
+
+# 🔁 Reset SQL Text expander state if new file selected
+if "last_uploaded_file" not in st.session_state:
+    st.session_state.last_uploaded_file = ""
+
+if selected_file != st.session_state.last_uploaded_file:
+    st.session_state.sql_expander_open = False
+    st.session_state.last_uploaded_file = selected_file
+
 
 # Find and parse selected file
 data = None
@@ -612,20 +640,26 @@ else:
 if len(uploaded_files) >= 2:
     st.markdown("### 🔍 Compare Two AWR Reports Side by Side")
 
+    # 🔍 Compare Two AWR Reports Section
+
+
+    # Initialize session state for compare_files
     if "compare_files" not in st.session_state:
         st.session_state.compare_files = []
+ 
+    # Reliable multiselect logic
+    selected = st.multiselect(
+        "Select exactly 2 reports to compare:",
+        file_names,
+        default=st.session_state.compare_files if len(st.session_state.compare_files) < 2 else [],
+        key="select_compare_reports_internal"
+    )
 
-    # Show multiselect only if less than 2 selected
-    if len(st.session_state.compare_files) < 2:
-        selected = st.multiselect(
-            "Select exactly 2 reports to compare:",
-            file_names,
-            default=st.session_state.compare_files,
-            key="select_compare_reports_internal"
-        )
+    # Accept exactly 2 files for comparison
+    if len(selected) == 2:
         st.session_state.compare_files = selected
-    else:
-        st.info(f"Selected Reports: **{st.session_state.compare_files[0]}** and **{st.session_state.compare_files[1]}**")
+    elif len(selected) > 2:
+        st.warning("Please select only 2 reports to compare.")
 
     if len(st.session_state.compare_files) == 2:
         # Proceed with comparison logic
@@ -696,21 +730,72 @@ if len(uploaded_files) >= 2:
 
             for title, key in sections:
                 st.markdown(f"### 🔍 {title} Comparison")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write(f"**{st.session_state.compare_files[0]} {title}**")
-                    if key in data_1 and not data_1[key].empty:
-                        st.dataframe(data_1[key], use_container_width=True)
-                    else:
-                        st.warning("No data found.")
-                with col2:
-                    st.write(f"**{st.session_state.compare_files[1]} {title}**")
-                    if key in data_2 and not data_2[key].empty:
-                        st.dataframe(data_2[key], use_container_width=True)
-                    else:
-                        st.warning("No data found.")
+
+                if key == "init_params":
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.write(f"**{st.session_state.compare_files[0]} {title}**")
+                        if key in data_1 and not data_1[key].empty:
+                            st.dataframe(data_1[key], use_container_width=True)
+                        else:
+                            st.warning("No data found.")
+
+                    with col2:
+                        st.write(f"**{st.session_state.compare_files[1]} {title}**")
+                        if key in data_2 and not data_2[key].empty:
+                            st.dataframe(data_2[key], use_container_width=True)
+                        else:
+                            st.warning("No data found.")
+                    # 🔍 Summary Notes for Changed Parameters
+                    st.markdown("#### 📝 Initialization Parameter Changes Summary")
+
+                    df1 = data_1[key].copy()
+                    df2 = data_2[key].copy()
+
+                    df1.columns = ['Parameter', 'Value_1']
+                    df2.columns = ['Parameter', 'Value_2']
+
+                    merged = pd.merge(df1, df2, on='Parameter', how='outer', indicator=True)
+
+                    notes = []
+
+                    for _, row in merged.iterrows():
+                        param = row['Parameter']
+                        val1 = str(row['Value_1']) if pd.notna(row['Value_1']) else "N/A"
+                        val2 = str(row['Value_2']) if pd.notna(row['Value_2']) else "N/A"
+
+                        if row['_merge'] == 'both' and val1 != val2:
+                            notes.append(f"🔁 **{param}** changed from **{val1}** to **{val2}**.")
+                        elif row['_merge'] == 'left_only':
+                            notes.append(f"➖ **{param}** was present in the first report with value **{val1}**, but not in the second.")
+                        elif row['_merge'] == 'right_only':
+                            notes.append(f"➕ **{param}** was newly added in the second report with value **{val2}**.")
 
 
+                    if notes:
+                        for note in notes:
+                            st.markdown(note)
+                    else:
+                        st.success("✅ No differences in initialization parameters.")
+
+                else:
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.write(f"**{st.session_state.compare_files[0]} {title}**")
+                        if key in data_1 and not data_1[key].empty:
+                            st.dataframe(data_1[key], use_container_width=True)
+                        else:
+                            st.warning("No data found.")
+
+                    with col2:
+                        st.write(f"**{st.session_state.compare_files[1]} {title}**")
+                        if key in data_2 and not data_2[key].empty:
+                            st.dataframe(data_2[key], use_container_width=True)
+                        else:
+                            st.warning("No data found.")
+    
 
 
 # DB Time
