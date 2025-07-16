@@ -644,6 +644,13 @@ if len(uploaded_files) >= 2:
         st.warning("Please select only 2 reports to compare.")
 
     if len(st.session_state.compare_files) == 2:
+        # 🔁 Reset SQL Full Text expander if comparison files changed
+        if "last_compare_pair" not in st.session_state:
+            st.session_state.last_compare_pair = []
+
+        if st.session_state.compare_files != st.session_state.last_compare_pair:
+            st.session_state.sql_expander_open = False
+            st.session_state.last_compare_pair = st.session_state.compare_files.copy()
         # Proceed with comparison logic
         data_1, data_2 = None, None
 
