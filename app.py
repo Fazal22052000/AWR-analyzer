@@ -6,28 +6,13 @@ import base64
 import plotly.graph_objects as go
 import plotly.express as px
 from io import BytesIO
-from auth import ENABLE_AUTH, login, logout
+
 
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
-# 🔐 Optional Authentication
-from auth import ENABLE_AUTH, login, logout
 
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "username" not in st.session_state:
-    st.session_state.username = ""
-
-# 🔐 Optional Authentication
-from auth import ENABLE_AUTH, login, logout
-
-if ENABLE_AUTH and not st.session_state.authenticated:
-    login()
-
-if not ENABLE_AUTH or st.session_state.authenticated:
-    logout()  # 👤 Show logout if logged in
 
     # 🌙 Dark mode toggle can go here inside authenticated block
     dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
