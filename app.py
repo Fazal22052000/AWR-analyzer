@@ -11,6 +11,7 @@ from io import BytesIO
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
+
 # 🌙 Dark mode toggle can go here inside authenticated block
 dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
@@ -153,7 +154,8 @@ def parse_awr(html):
     sga_advisory_df = pd.DataFrame()
     pga_advisory_df = pd.DataFrame()
     seg_physical_reads = pd.DataFrame()
-    seg_row_lock_waits = pd.DataFrame()  
+    seg_row_lock_waits = pd.DataFrame()
+    seg_table_scans = pd.DataFrame()  
     top_sql_events = pd.DataFrame() 
     activity_over_time = pd.DataFrame()
     init_params = pd.DataFrame()
@@ -167,6 +169,7 @@ def parse_awr(html):
     # Default values for other fields
     db_name = "N/A"
     db_time_value = "N/A"
+    idle_cpu = None
     snap_time = "N/A"
     cdb_status = "N/A"
     memory_gb = "N/A"
@@ -228,6 +231,16 @@ def parse_awr(html):
                 try:
                     db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
                     db_time_value = db_time_row['Per Second'].values[0]
+                except:
+                    pass
+
+            # ✅ Extract Idle CPU %
+            if '%idle' in lower_headers:
+                try:
+                    idx_idle = lower_headers.index('%idle')
+                    idle_val = df.iloc[0, idx_idle]
+                    if isinstance(idle_val, (int, float)) or str(idle_val).replace('.', '', 1).isdigit():
+                        idle_cpu = float(idle_val)
                 except:
                     pass
 
@@ -423,6 +436,15 @@ def parse_awr(html):
                     seg_row_lock_waits = df
             break
 
+    for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
+        if "Segments by Table Scans" in tag.text:
+            next_table = tag.find_next("table")
+            if next_table:
+                df = to_df(next_table)
+                if df is not None and not df.empty:
+                    seg_table_scans = df
+            break
+
     for a in soup.find_all("a"):
         if a.get("name") == "26":
             table = a.find_next("table")
@@ -490,6 +512,7 @@ def parse_awr(html):
         'init_params': init_params,
         'seg_physical_reads': seg_physical_reads,
         'seg_row_lock_waits': seg_row_lock_waits,
+        'seg_table_scans': seg_table_scans,
         'total_cpu': total_cpu,
         'rac_status': rac_status,
         'edition': f"{edition} {release}" if release != "N/A" else edition,
@@ -502,77 +525,77 @@ def parse_awr(html):
 
 
 # --- Add this BELOW your parse_awr() function ---
-
 def get_intelligent_insights(data):
     insights = []
-
-
-
 
     # Rule: High DB Time per second
     if not data['load_profile'].empty:
         try:
             db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
             db_time = float(db_time_row['Per Second'].values[0])
-
-            if db_time > 45.0:  # You can change this threshold
-                insights.append(f"⚠️ High Avg Active Session detected: {db_time:.2f} — indicates significant load on the database.")
+            if db_time > 40.0:
+                insights.append(f"🔥 [CRITICAL] High DB Time detected: {db_time:.2f}/sec — extreme load on database.")
         except:
             pass
 
-
-    # Rule: Suboptimal SGA
+    # Rule: SGA Advisory suggests increasing SGA size could reduce estimated physical reads and improve buffer cache performance
     if not data['sga_advisory'].empty:
         sga_df = data['sga_advisory'].copy()
         try:
-            sga_df['Est DB Time (s)'] = pd.to_numeric(sga_df['Est DB Time (s)'].replace(',', '', regex=True), errors='coerce')
-            min_est_time = sga_df['Est DB Time (s)'].min()
-            current_est_time = sga_df.iloc[len(sga_df)//2]['Est DB Time (s)']
-            if float(current_est_time) - min_est_time > 10:
-                insights.append("💡 SGA Advisory suggests increasing SGA size could reduce estimated DB time.")
+            sga_df.columns = sga_df.columns.str.strip()
+            sga_df['Est Physical Reads'] = pd.to_numeric(sga_df['Est Physical Reads'].replace(',', '', regex=True), errors='coerce')
+            current_physical_reads = sga_df.iloc[len(sga_df)//2]['Est Physical Reads']
+            min_physical_reads = sga_df['Est Physical Reads'].min()
+            if pd.notna(current_physical_reads) and (current_physical_reads - min_physical_reads) > 1000:
+                insights.append("⚠️ [WARNING] SGA Advisory suggests increasing SGA size could reduce estimated physical reads and improve buffer cache performance.")
         except:
             pass
-     
 
-        # Rule: Detect specific contention events (enq: TX and enq: TM)
+    # Rule: Detect contention events (TX/TM)
     if not data['wait_events'].empty:
         try:
             df = data['wait_events'].copy()
             df.columns = df.columns.str.strip()
             df['% DB time'] = pd.to_numeric(df['% DB time'], errors='coerce')
             df['Event'] = df['Event'].astype(str)
-
             tx_tm_events = df[
                 df['Event'].str.lower().isin(['enq: tx - row lock contention', 'enq: tm - contention'])
-                & (df['% DB time'] > 1)  # Only if it's significant
+                & (df['% DB time'] > 1)
             ]
-
             if not tx_tm_events.empty:
                 listed = ', '.join(tx_tm_events['Event'])
-                insights.append(f"🚨 Contention detected: {listed} — consider investigating blocking sessions or DML concurrency.")
+                insights.append(f"🔥 [CRITICAL] Contention detected: {listed} — investigate blocking sessions or DML concurrency.")
         except:
             pass
 
-
-     # Rule: Suboptimal PGA
+    # Rule: Suboptimal PGA
     if not data['pga_advisory'].empty:
         try:
             pga_df = data['pga_advisory'].copy()
             pga_df.columns = pga_df.columns.str.strip()
             pga_df['Estd Time'] = pd.to_numeric(pga_df['Estd Time'].replace(',', '', regex=True), errors='coerce')
-
-            current_row = pga_df.iloc[len(pga_df)//2]  # assume current PGA is near center
+            current_row = pga_df.iloc[len(pga_df)//2]
             current_time = current_row['Estd Time']
             min_time = pga_df['Estd Time'].min()
-
             if current_time - min_time > 10:
-                insights.append("💡 PGA Advisory suggests increasing PGA size could reduce estimated execution time.")
+                insights.append("⚠️ [WARNING] PGA Advisory suggests increasing PGA size could improve execution time.")
         except:
             pass
 
-
+    # Rule: Idle CPU
+    try:
+        if data['idle_cpu'] is not None and isinstance(data['idle_cpu'], (int, float)):
+            if data['idle_cpu'] < 10:
+                insights.append(f"🔥 [CRITICAL] Very low idle CPU ({data['idle_cpu']:.1f}%) — High CPU pressure.")
+            elif data['idle_cpu'] < 30:
+                insights.append(f"⚠️ [WARNING] Idle CPU below optimal level ({data['idle_cpu']:.1f}%).")
+            else:
+                insights.append(f"✅ Idle CPU healthy at {data['idle_cpu']:.1f}%.")
+    except:
+        pass
 
     return insights
+
 
 
 # Upload file - Main uploader
@@ -618,18 +641,14 @@ else:
     st.error("Failed to parse the selected AWR report. Please check the file.")
     st.stop()
 
+
 # ---------------- Side-by-side Comparison Feature ---------------- #
 if len(uploaded_files) >= 2:
     st.markdown("### 🔍 Compare Two AWR Reports Side by Side")
 
-    # 🔍 Compare Two AWR Reports Section
-
-
-    # Initialize session state for compare_files
     if "compare_files" not in st.session_state:
         st.session_state.compare_files = []
- 
-    # Reliable multiselect logic
+
     selected = st.multiselect(
         "Select exactly 2 reports to compare:",
         file_names,
@@ -637,21 +656,19 @@ if len(uploaded_files) >= 2:
         key="select_compare_reports_internal"
     )
 
-    # Accept exactly 2 files for comparison
     if len(selected) == 2:
         st.session_state.compare_files = selected
     elif len(selected) > 2:
         st.warning("Please select only 2 reports to compare.")
 
     if len(st.session_state.compare_files) == 2:
-        # 🔁 Reset SQL Full Text expander if comparison files changed
         if "last_compare_pair" not in st.session_state:
             st.session_state.last_compare_pair = []
 
         if st.session_state.compare_files != st.session_state.last_compare_pair:
             st.session_state.sql_expander_open = False
             st.session_state.last_compare_pair = st.session_state.compare_files.copy()
-        # Proceed with comparison logic
+
         data_1, data_2 = None, None
 
         for uploaded in uploaded_files:
@@ -665,13 +682,13 @@ if len(uploaded_files) >= 2:
         if data_1 and data_2:
             st.success(f"Comparing **{st.session_state.compare_files[0]}** vs **{st.session_state.compare_files[1]}**")
 
-            # --- Updated Environment Info Section ---
             st.markdown("### 🛠️ Environment Info Comparison")
             col1, col2 = st.columns(2)
 
             with col1:
                 st.write(f"**📄 Report:** {st.session_state.compare_files[0]}")
                 st.write(f"**DB Name:** {data_1['db_name']}")
+                st.write(f"**Idle CPU (%):** {data_1['idle_cpu']:.1f}" if data_1['idle_cpu'] is not None else "**Idle CPU (%):** N/A")
                 st.write(f"**Instance Name:** {data_1['instance_name']}")
                 st.write(f"**Instance Number:** {data_1['instance_num']}")
                 st.write(f"**Startup Time:** {data_1['startup_time']}")
@@ -688,6 +705,7 @@ if len(uploaded_files) >= 2:
             with col2:
                 st.write(f"**📄 Report:** {st.session_state.compare_files[1]}")
                 st.write(f"**DB Name:** {data_2['db_name']}")
+                st.write(f"**Idle CPU (%):** {data_2['idle_cpu']:.1f}" if data_2['idle_cpu'] is not None else "**Idle CPU (%):** N/A")
                 st.write(f"**Instance Name:** {data_2['instance_name']}")
                 st.write(f"**Instance Number:** {data_2['instance_num']}")
                 st.write(f"**Startup Time:** {data_2['startup_time']}")
@@ -701,8 +719,6 @@ if len(uploaded_files) >= 2:
                 st.write(f"**Begin Snap Time:** {data_2['begin_snap_time']}")
                 st.write(f"**End Snap Time:** {data_2['end_snap_time']}")
 
-
-            # Section Comparisons
             sections = [
                 ("Load Profile", "load_profile"),
                 ("Wait Events", "wait_events"),
@@ -712,6 +728,7 @@ if len(uploaded_files) >= 2:
                 ("PGA Advisory", "pga_advisory"),
                 ("Segments by Physical Reads", "seg_physical_reads"),
                 ("Segments by Row Lock Waits", "seg_row_lock_waits"),
+                ("Segments by Table Scans", "seg_table_scans"),  # ✅ NEW
                 ("Top SQL with Events", "top_sql_events"),
                 ("Initialization Parameters", "init_params"),
                 ("Activity Over Time", "activity_over_time")
@@ -720,23 +737,23 @@ if len(uploaded_files) >= 2:
             for title, key in sections:
                 st.markdown(f"### 🔍 {title} Comparison")
 
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.write(f"**{st.session_state.compare_files[0]} {title}**")
+                    if key in data_1 and not data_1[key].empty:
+                        st.dataframe(data_1[key], use_container_width=True)
+                    else:
+                        st.warning("No data found.")
+
+                with col2:
+                    st.write(f"**{st.session_state.compare_files[1]} {title}**")
+                    if key in data_2 and not data_2[key].empty:
+                        st.dataframe(data_2[key], use_container_width=True)
+                    else:
+                        st.warning("No data found.")
+
                 if key == "init_params":
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.write(f"**{st.session_state.compare_files[0]} {title}**")
-                        if key in data_1 and not data_1[key].empty:
-                            st.dataframe(data_1[key], use_container_width=True)
-                        else:
-                            st.warning("No data found.")
-
-                    with col2:
-                        st.write(f"**{st.session_state.compare_files[1]} {title}**")
-                        if key in data_2 and not data_2[key].empty:
-                            st.dataframe(data_2[key], use_container_width=True)
-                        else:
-                            st.warning("No data found.")
-                    # 🔍 Summary Notes for Changed Parameters
                     st.markdown("#### 📝 Initialization Parameter Changes Summary")
 
                     df1 = data_1[key].copy()
@@ -761,29 +778,12 @@ if len(uploaded_files) >= 2:
                         elif row['_merge'] == 'right_only':
                             notes.append(f"➕ **{param}** was newly added in the second report with value **{val2}**.")
 
-
                     if notes:
                         for note in notes:
                             st.markdown(note)
                     else:
                         st.success("✅ No differences in initialization parameters.")
 
-                else:
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.write(f"**{st.session_state.compare_files[0]} {title}**")
-                        if key in data_1 and not data_1[key].empty:
-                            st.dataframe(data_1[key], use_container_width=True)
-                        else:
-                            st.warning("No data found.")
-
-                    with col2:
-                        st.write(f"**{st.session_state.compare_files[1]} {title}**")
-                        if key in data_2 and not data_2[key].empty:
-                            st.dataframe(data_2[key], use_container_width=True)
-                        else:
-                            st.warning("No data found.")
     
 
 
@@ -802,6 +802,7 @@ st.markdown("""
 <div class="card-container">
     <div class="card"><h4>🖥️ Total CPUs</h4><p>{cpu}</p></div>
     <div class="card"><h4>🕒 DB Time (s)</h4><p>{db_time}</p></div>
+    <div class="card"><h4>🧠 Idle CPU (%)</h4><p>{idle}</p></div>
     <div class="card"><h4>🗃️ RAC Status</h4><p>{rac}</p></div>
     <div class="card"><h4>🔖 Edition/Release</h4><p>{edition}</p></div>
     <div class="card"><h4>💾 Memory (GB)</h4><p>{memory}</p></div>
@@ -816,6 +817,7 @@ st.markdown("""
 """.format(
     cpu=data['total_cpu'],
     db_time=data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A",
+    idle=f"{data['idle_cpu']:.1f}" if data['idle_cpu'] is not None else "N/A",
     rac=data['rac_status'],
     edition=data['edition'],
     memory=data['memory_gb'],
@@ -827,6 +829,7 @@ st.markdown("""
     inst_num=data['instance_num'],
     startup=data['startup_time']
 ), unsafe_allow_html=True)
+
 
 
 # 🧠 Intelligent Insights
@@ -850,11 +853,13 @@ st.markdown("""
 - [⚙️ Init Parameters](#initialization-parameters)
 - [🥧 Segments by Physical Reads](#segments-by-physical-reads)
 - [🔒 Segments by Row Lock Waits](#segments-by-row-lock-waits)
+- [🔍 Segments by Table Scans](#segments-by-table-scans)
 - [🧠 PGA Advisory](#advisory-statistics--pga-advisory)
 - [💡 SGA Advisory](#sga-target-advisory)
 - [📝 SQL Events](#top-sql-with-top-events)
 - [📊 Activity Timeline](#activity-over-time)
 """, unsafe_allow_html=True)
+
 
 
 # Load Profile
@@ -1069,6 +1074,28 @@ with st.expander("📊 Segments by Row Lock Waits", expanded=False):
     else:
         st.warning("Segments by Row Lock Waits section not found.")
 
+# Segments by Table Scans
+st.markdown('<div id="segments-by-table-scans"></div>', unsafe_allow_html=True)
+st.write("")
+with st.expander("📊 Segments by Table Scans", expanded=False):
+    if not data['seg_table_scans'].empty:
+        chart_df = data['seg_table_scans'].copy()
+        chart_df['Table Scans'] = chart_df['Table Scans'].replace(',', '', regex=True)
+        chart_df['Table Scans'] = pd.to_numeric(chart_df['Table Scans'], errors='coerce')
+        fig = px.bar(
+            chart_df.sort_values(by='Table Scans', ascending=False).head(10),
+            x='Object Name', y='Table Scans', text='Table Scans', color_discrete_sequence=["#e67e22"]
+        )
+        fig.update_traces(textposition='outside')
+        fig.update_layout(title="Top Segments by Table Scans", xaxis_title="Object Name", yaxis_title="Table Scans",
+                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_xaxes(tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Segments by Table Scans section not found.")
+
+
+
 # PGA Advisory
 st.markdown('<div id="advisory-statistics--pga-advisory"></div>', unsafe_allow_html=True)
 st.write("")
@@ -1191,7 +1218,8 @@ report_dict = {
     # ✅ Environment Info comes first
     'Environment_Info': pd.DataFrame({
         'Database Name':      [data['db_name']],
-        'DB Time (s)': [data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A"],
+        'DB Time (s)':        [data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A"],
+        'Idle CPU (%)':       [f"{data['idle_cpu']:.1f}" if data['idle_cpu'] is not None else "N/A"],
 
         'Instance':           [data['instance_name']],
         'Instance Number':    [data['instance_num']],
@@ -1216,12 +1244,14 @@ report_dict = {
     'SGA_Advisory': data['sga_advisory'],
     'Segments_Physical_Reads': data['seg_physical_reads'],
     'Segments_Row_Lock_Waits': data['seg_row_lock_waits'],
+    'Segments_Table_Scans': data['seg_table_scans'],
     'Top_SQL_Events': data['top_sql_events'],
     'Activity_Over_Time': data['activity_over_time'],
 
-    # ✅ Add Full SQL Texts Section
+    # ✅ Full SQL Texts Section
     'Complete_SQL_Texts': data['full_sql_texts'] if not data.get('full_sql_texts', pd.DataFrame()).empty else pd.DataFrame()
 }
+
 
 
 
@@ -1278,6 +1308,7 @@ pdf_content = f"""Oracle AWR Analyzer - Full Text Report
 # Add Environment Info to Text Report
 pdf_content += "\n\n🛠️ AWR Environment Info\n" + "-" * 30
 pdf_content += f"\nDatabase Name:      {data['db_name']}"
+pdf_content += f"\nIdle CPU (%):       {f'{data['idle_cpu']:.1f}' if data['idle_cpu'] is not None else 'N/A'}"
 pdf_content += f"\nDB Time (s):        {data['load_profile'][data['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data['load_profile'].empty else 'N/A'}"
 pdf_content += f"\nInstance:           {data['instance_name']}"
 pdf_content += f"\nInstance Number:    {data['instance_num']}"
@@ -1300,6 +1331,7 @@ pdf_content += df_to_text(data['pga_advisory'], "🧠 PGA Memory Advisory")
 pdf_content += df_to_text(data['sga_advisory'], "💡 SGA Target Advisory")
 pdf_content += df_to_text(data['seg_physical_reads'], "🥧 Segments by Physical Reads")
 pdf_content += df_to_text(data['seg_row_lock_waits'], "🔒 Segments by Row Lock Waits")
+pdf_content += df_to_text(data['seg_table_scans'], "🔍 Segments by Table Scans")
 pdf_content += df_to_text(data['top_sql_events'], "📝 Top SQL with Top Events")
 pdf_content += df_to_text(data['activity_over_time'], "📊 Activity Over Time Breakdown")
 
