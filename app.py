@@ -12,6 +12,8 @@ from io import BytesIO
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
+
+
 # 🌙 Dark mode toggle can go here inside authenticated block
 dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
@@ -534,7 +536,7 @@ def get_intelligent_insights(data):
             db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
             db_time = float(db_time_row['Per Second'].values[0])
             if db_time > 40.0:
-                insights.append(f"🔥 [CRITICAL] High DB Time detected: {db_time:.2f}/sec — extreme load on database.")
+                insights.append(f"🔥 [CRITICAL] High average active Session detected: {db_time:.2f}/sec — High load on database.")
         except:
             pass
 
@@ -643,6 +645,7 @@ else:
 
 
 # ---------------- Side-by-side Comparison Feature ---------------- #
+# ---------------- Side-by-side Comparison Feature ---------------- #
 if len(uploaded_files) >= 2:
     st.markdown("### 🔍 Compare Two AWR Reports Side by Side")
 
@@ -679,46 +682,30 @@ if len(uploaded_files) >= 2:
                 html_2 = uploaded.getvalue().decode('utf-8')
                 data_2 = parse_awr(html_2)
 
-        if data_1 and data_2:
-            st.success(f"Comparing **{st.session_state.compare_files[0]}** vs **{st.session_state.compare_files[1]}**")
+        def render_env_card(label, value, icon="", bg="#f8f9fa"):
+            return f'<div style="background:{bg};padding:1rem;border-radius:10px;width:45%;"><b>{icon} {label}</b><br>{value}</div>'
 
-            st.markdown("### 🛠️ Environment Info Comparison")
-            col1, col2 = st.columns(2)
+        def color_code(val, low, high, reverse=False):
+            try:
+                val = float(val)
+                if reverse:
+                    if val < low:
+                        return ("🔥", "#ffcccc")
+                    elif val < high:
+                        return ("⚠️", "#fff3cd")
+                    else:
+                        return ("✅", "#d4edda")
+                else:
+                    if val > high:
+                        return ("🔥", "#ffcccc")
+                    elif val > low:
+                        return ("⚠️", "#fff3cd")
+                    else:
+                        return ("✅", "#d4edda")
+            except:
+                return ("❓", "#f8f9fa")
 
-            with col1:
-                st.write(f"**📄 Report:** {st.session_state.compare_files[0]}")
-                st.write(f"**DB Name:** {data_1['db_name']}")
-                st.write(f"**Idle CPU (%):** {data_1['idle_cpu']:.1f}" if data_1['idle_cpu'] is not None else "**Idle CPU (%):** N/A")
-                st.write(f"**Instance Name:** {data_1['instance_name']}")
-                st.write(f"**Instance Number:** {data_1['instance_num']}")
-                st.write(f"**Startup Time:** {data_1['startup_time']}")
-                st.write(f"**DB Time (s):** {data_1['load_profile'][data_1['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data_1['load_profile'].empty else 'N/A'}")
-                st.write(f"**Edition / Release:** {data_1['edition']}")
-                st.write(f"**RAC Status:** {data_1['rac_status']}")
-                st.write(f"**CDB Status:** {data_1['cdb_status']}")
-                st.write(f"**Total CPUs:** {data_1['total_cpu']}")
-                st.write(f"**Memory (GB):** {data_1['memory_gb']}")
-                st.write(f"**Platform:** {data_1['platform']}")
-                st.write(f"**Begin Snap Time:** {data_1['begin_snap_time']}")
-                st.write(f"**End Snap Time:** {data_1['end_snap_time']}")
-
-            with col2:
-                st.write(f"**📄 Report:** {st.session_state.compare_files[1]}")
-                st.write(f"**DB Name:** {data_2['db_name']}")
-                st.write(f"**Idle CPU (%):** {data_2['idle_cpu']:.1f}" if data_2['idle_cpu'] is not None else "**Idle CPU (%):** N/A")
-                st.write(f"**Instance Name:** {data_2['instance_name']}")
-                st.write(f"**Instance Number:** {data_2['instance_num']}")
-                st.write(f"**Startup Time:** {data_2['startup_time']}")
-                st.write(f"**DB Time (s):** {data_2['load_profile'][data_2['load_profile']['Metric'].str.contains('DB Time', na=False)]['Per Second'].values[0] if not data_2['load_profile'].empty else 'N/A'}")
-                st.write(f"**Edition / Release:** {data_2['edition']}")
-                st.write(f"**RAC Status:** {data_2['rac_status']}")
-                st.write(f"**CDB Status:** {data_2['cdb_status']}")
-                st.write(f"**Total CPUs:** {data_2['total_cpu']}")
-                st.write(f"**Memory (GB):** {data_2['memory_gb']}")
-                st.write(f"**Platform:** {data_2['platform']}")
-                st.write(f"**Begin Snap Time:** {data_2['begin_snap_time']}")
-                st.write(f"**End Snap Time:** {data_2['end_snap_time']}")
-
+        def compare_sections(data_1, data_2, file_names):
             sections = [
                 ("Load Profile", "load_profile"),
                 ("Wait Events", "wait_events"),
@@ -728,7 +715,7 @@ if len(uploaded_files) >= 2:
                 ("PGA Advisory", "pga_advisory"),
                 ("Segments by Physical Reads", "seg_physical_reads"),
                 ("Segments by Row Lock Waits", "seg_row_lock_waits"),
-                ("Segments by Table Scans", "seg_table_scans"),  # ✅ NEW
+                ("Segments by Table Scans", "seg_table_scans"),
                 ("Top SQL with Events", "top_sql_events"),
                 ("Initialization Parameters", "init_params"),
                 ("Activity Over Time", "activity_over_time")
@@ -736,18 +723,17 @@ if len(uploaded_files) >= 2:
 
             for title, key in sections:
                 st.markdown(f"### 🔍 {title} Comparison")
-
                 col1, col2 = st.columns(2)
 
                 with col1:
-                    st.write(f"**{st.session_state.compare_files[0]} {title}**")
+                    st.write(f"**{file_names[0]} {title}**")
                     if key in data_1 and not data_1[key].empty:
                         st.dataframe(data_1[key], use_container_width=True)
                     else:
                         st.warning("No data found.")
 
                 with col2:
-                    st.write(f"**{st.session_state.compare_files[1]} {title}**")
+                    st.write(f"**{file_names[1]} {title}**")
                     if key in data_2 and not data_2[key].empty:
                         st.dataframe(data_2[key], use_container_width=True)
                     else:
@@ -755,34 +741,115 @@ if len(uploaded_files) >= 2:
 
                 if key == "init_params":
                     st.markdown("#### 📝 Initialization Parameter Changes Summary")
-
                     df1 = data_1[key].copy()
                     df2 = data_2[key].copy()
-
                     df1.columns = ['Parameter', 'Value_1']
                     df2.columns = ['Parameter', 'Value_2']
-
                     merged = pd.merge(df1, df2, on='Parameter', how='outer', indicator=True)
-
                     notes = []
-
                     for _, row in merged.iterrows():
                         param = row['Parameter']
                         val1 = str(row['Value_1']) if pd.notna(row['Value_1']) else "N/A"
                         val2 = str(row['Value_2']) if pd.notna(row['Value_2']) else "N/A"
-
                         if row['_merge'] == 'both' and val1 != val2:
                             notes.append(f"🔁 **{param}** changed from **{val1}** to **{val2}**.")
                         elif row['_merge'] == 'left_only':
                             notes.append(f"➖ **{param}** was present in the first report with value **{val1}**, but not in the second.")
                         elif row['_merge'] == 'right_only':
                             notes.append(f"➕ **{param}** was newly added in the second report with value **{val2}**.")
-
                     if notes:
                         for note in notes:
                             st.markdown(note)
                     else:
                         st.success("✅ No differences in initialization parameters.")
+
+                if key == "top_sql":
+                    st.markdown("#### 🧠 SQL Differences (Elapsed Time)")
+                    df1 = data_1[key].copy()
+                    df2 = data_2[key].copy()
+                    if not df1.empty and not df2.empty:
+                        df1.columns = df1.columns.str.upper().str.strip()
+                        df2.columns = df2.columns.str.upper().str.strip()
+                        df1 = df1[['SQL ID', 'ELAPSED TIME (S)']].dropna()
+                        df2 = df2[['SQL ID', 'ELAPSED TIME (S)']].dropna()
+                        df1.rename(columns={'ELAPSED TIME (S)': 'Elapsed_1'}, inplace=True)
+                        df2.rename(columns={'ELAPSED TIME (S)': 'Elapsed_2'}, inplace=True)
+                        merged = pd.merge(df1, df2, on='SQL ID', how='outer', indicator=True)
+                        diff_notes = []
+                        for _, row in merged.iterrows():
+                            sql_id = row['SQL ID']
+                            e1 = row.get('Elapsed_1', None)
+                            e2 = row.get('Elapsed_2', None)
+                            if row['_merge'] == 'left_only':
+                                diff_notes.append(f"➖ SQL ID **{sql_id}** was present in **Report 1** only.")
+                            elif row['_merge'] == 'right_only':
+                                diff_notes.append(f"➕ SQL ID **{sql_id}** was newly added in **Report 2**.")
+                            elif pd.notna(e1) and pd.notna(e2):
+                                delta = e2 - e1
+                                if abs(delta) >= 1:
+                                    symbol = "🔹" if delta > 0 else "🔻"
+                                    diff_notes.append(f"{symbol} SQL ID **{sql_id}** changed Elapsed Time from **{e1:.2f}s** to **{e2:.2f}s** ({'increased' if delta > 0 else 'decreased'} by {abs(delta):.2f}s).")
+                        if diff_notes:
+                            for note in diff_notes:
+                                st.markdown(note)
+                        else:
+                            st.success("✅ No significant SQL differences found.")
+
+        if data_1 and data_2:
+            st.success(f"Comparing **{st.session_state.compare_files[0]}** vs **{st.session_state.compare_files[1]}**")
+            # Render visual environment info as cards
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"### 📄 Report: {st.session_state.compare_files[0]}")
+                db_time_val = data_1['load_profile'][data_1['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data_1['load_profile'].empty else "N/A"
+                idle_cpu_val = data_1['idle_cpu']
+                db_time_icon, db_time_bg = color_code(db_time_val, 10, 40, reverse=False)
+                idle_icon, idle_bg = color_code(idle_cpu_val, 10, 30, reverse=True)
+                cards = [
+                    render_env_card("DB Time (s)", f"{db_time_icon} {db_time_val}", "🕒", db_time_bg),
+                    render_env_card("Idle CPU (%)", f"{idle_icon} {idle_cpu_val:.1f}", "🧠", idle_bg),
+                    render_env_card("DB Name", data_1['db_name'], "🗄️"),
+                    render_env_card("Instance Name", data_1['instance_name'], "📛"),
+                    render_env_card("Instance Number", data_1['instance_num'], "#️⃣"),
+                    render_env_card("Startup Time", data_1['startup_time'], "⏱️"),
+                    render_env_card("Edition / Release", data_1['edition'], "🔖"),
+                    render_env_card("RAC Status", data_1['rac_status'], "🗃️"),
+                    render_env_card("CDB Status", data_1['cdb_status'], "🏢"),
+                    render_env_card("Total CPUs", data_1['total_cpu'], "🖥️"),
+                    render_env_card("Memory (GB)", data_1['memory_gb'], "💾"),
+                    render_env_card("Platform", data_1['platform'], "💻"),
+                    render_env_card("Begin Snap Time", data_1['begin_snap_time'], "🚩"),
+                    render_env_card("End Snap Time", data_1['end_snap_time'], "🏁")
+                ]
+                st.markdown('<div style="display:flex;flex-wrap:wrap;gap:10px;">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"### 📄 Report: {st.session_state.compare_files[1]}")
+                db_time_val = data_2['load_profile'][data_2['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data_2['load_profile'].empty else "N/A"
+                idle_cpu_val = data_2['idle_cpu']
+                db_time_icon, db_time_bg = color_code(db_time_val, 10, 40, reverse=False)
+                idle_icon, idle_bg = color_code(idle_cpu_val, 10, 30, reverse=True)
+                cards = [
+                    render_env_card("DB Time (s)", f"{db_time_icon} {db_time_val}", "🕒", db_time_bg),
+                    render_env_card("Idle CPU (%)", f"{idle_icon} {idle_cpu_val:.1f}", "🧠", idle_bg),
+                    render_env_card("DB Name", data_2['db_name'], "🗄️"),
+                    render_env_card("Instance Name", data_2['instance_name'], "📛"),
+                    render_env_card("Instance Number", data_2['instance_num'], "#️⃣"),
+                    render_env_card("Startup Time", data_2['startup_time'], "⏱️"),
+                    render_env_card("Edition / Release", data_2['edition'], "🔖"),
+                    render_env_card("RAC Status", data_2['rac_status'], "🗃️"),
+                    render_env_card("CDB Status", data_2['cdb_status'], "🏢"),
+                    render_env_card("Total CPUs", data_2['total_cpu'], "🖥️"),
+                    render_env_card("Memory (GB)", data_2['memory_gb'], "💾"),
+                    render_env_card("Platform", data_2['platform'], "💻"),
+                    render_env_card("Begin Snap Time", data_2['begin_snap_time'], "🚩"),
+                    render_env_card("End Snap Time", data_2['end_snap_time'], "🏁")
+                ]
+                st.markdown('<div style="display:flex;flex-wrap:wrap;gap:10px;">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+
+            # ✅ Render all comparison sections
+            compare_sections(data_1, data_2, st.session_state.compare_files)
+
+
 
     
 
