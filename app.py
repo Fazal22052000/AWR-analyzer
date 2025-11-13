@@ -1,21 +1,41 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 import plotly.express as px
 from bs4 import BeautifulSoup
 import base64
+import json
+import subprocess
+import io
+import time
 import plotly.graph_objects as go
 import plotly.express as px
 from io import BytesIO
-
+from io import BytesIO, StringIO
+from auth import ENABLE_AUTH, login, logout
 
 
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
 
+    # 🌙 Dark mode toggle can go here inside authenticated block
+    dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
-# 🌙 Dark mode toggle can go here inside authenticated block
-dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+
+# --- Initialize required session_state variables to avoid AttributeError ---
+default_session_vars = {
+    "ai_11point_result": None,
+    "compare_files": [],
+    "sql_expander_open": False,
+    "authenticated": False,
+    "username": "",
+}
+
+for key, val in default_session_vars.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
 
 if dark_mode:
     st.markdown("""
@@ -319,10 +339,30 @@ def parse_awr(html):
             if next_table:
                 df = to_df(next_table)
                 if df is not None and not df.empty:
-                    cols = [str(c).strip().lower() for c in df.columns]
-                    if all(col in cols for col in ['sql id', 'sql text', 'elapsed time (s)']):
-                        top_sql = df[[c for c in df.columns if str(c).lower() in ['sql id', 'sql text', 'elapsed time (s)']]]
+                    # Normalize column names: strip spaces and make uppercase
+                    df.columns = df.columns.str.strip().str.upper()
+
+                    # Rename possible variations of SQL ID column
+                    rename_map = {
+                        'SQLID': 'SQL ID',
+                        'SQL ID': 'SQL ID',
+                        'SQL Id': 'SQL ID',
+                        'SQLID ': 'SQL ID',
+                        'SQL_ID': 'SQL ID'
+                    }
+                    df.rename(columns=rename_map, inplace=True)
+
+                    # Fill down SQL IDs if some rows are blank
+                    if 'SQL ID' in df.columns:
+                        df['SQL ID'] = df['SQL ID'].replace('', None).fillna(method='ffill')
+
+                    # Keep only needed columns
+                    keep_cols = ['ELAPSED TIME (S)', 'EXECUTIONS', 'ELAPSED TIME PER EXEC (S)', 'SQL ID', 'SQL TEXT']
+                    top_sql = df[[col for col in df.columns if col in keep_cols]]
             break
+
+
+
 
     # SQL ordered by CPU Time
     for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
@@ -481,8 +521,12 @@ def parse_awr(html):
             if next_table:
                 df = to_df(next_table)
                 if df is not None and not df.empty:
+                    # Fill forward SQL IDs where blank (for multi-row events in AWR)
+                    if 'SQL ID' in df.columns:
+                        df['SQL ID'] = df['SQL ID'].replace('', None).fillna(method='ffill')
                     top_sql_events = df
-            break
+            # Do not break, in case there are multiple tables for this section
+
 
     # Extract Activity Over Time section
     for tag in soup.find_all(["b", "font", "p", "div", "h2", "h3"]):
@@ -526,51 +570,110 @@ def parse_awr(html):
     }
 
 
-# --- Add this BELOW your parse_awr() function ---
+
+# ---------------------------------------------------------
+# 🌟 Enhanced Mistral AI Integration for AWR Analysis
+# ---------------------------------------------------------
+from mistralai import Mistral
+import os, time
+
+def ai_generate(prompt: str) -> str:
+    """
+    Calls Mistral AI to analyze Oracle AWR data based on the given prompt.
+    Automatically retries if the model is busy.
+    """
+    try:
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            return "⚠️ AI Error: MISTRAL_API_KEY not found in environment."
+
+        client = Mistral(api_key=api_key)
+
+        messages = [
+            {"role": "system", "content": "You are an expert Oracle Database Performance Engineer specializing in AWR report analysis. Provide clear, technical explanations."},
+            {"role": "user", "content": prompt},
+        ]
+
+        # Retry up to 3 times for capacity errors
+        for attempt in range(3):
+            try:
+                response = client.chat.complete(
+                    model="mistral-large-latest",
+                    messages=messages,
+                    temperature=0.2,
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                if "capacity" in str(e).lower():
+                    time.sleep(5)
+                else:
+                    raise
+        return "⚠️ Mistral API capacity issue persisted after retries."
+
+    except Exception as e:
+        return f"⚠️ AI Error: {str(e)}"
+
+
+
+# ====================================
+# Intelligent Insights
+# ====================================
 def get_intelligent_insights(data):
+    """
+    Return a list of insight strings based on parsed AWR data.
+    Robustly detects full-table-scan SQLs by scanning all columns of top_sql_events
+    for 'TABLE ACCESS' + 'FULL', and then tries to map to seg_table_scans table names.
+    """
     insights = []
 
     # Rule: High DB Time per second
-    if not data['load_profile'].empty:
-        try:
+    try:
+        if not data.get('load_profile', pd.DataFrame()).empty:
             db_time_row = data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]
-            db_time = float(db_time_row['Per Second'].values[0])
-            if db_time > 40.0:
-                insights.append(f"🔥 [CRITICAL] High average active Session detected: {db_time:.2f}/sec — High load on database.")
-        except:
-            pass
+            if not db_time_row.empty:
+                db_time = float(db_time_row['Per Second'].values[0])
+                if db_time > 40.0:
+                    insights.append(f"🔥 [CRITICAL] High average active sessions (DB Time per sec = {db_time:.2f}) — high load on DB.")
+    except Exception:
+        pass
 
-    # Rule: SGA Advisory suggests increasing SGA size could reduce estimated physical reads and improve buffer cache performance
-    if not data['sga_advisory'].empty:
-        sga_df = data['sga_advisory'].copy()
-        try:
+    # Rule: SGA Advisory (best-effort)
+    try:
+        if not data.get('sga_advisory', pd.DataFrame()).empty:
+            sga_df = data['sga_advisory'].copy()
             sga_df.columns = sga_df.columns.str.strip()
-            sga_df['Est Physical Reads'] = pd.to_numeric(sga_df['Est Physical Reads'].replace(',', '', regex=True), errors='coerce')
-            current_physical_reads = sga_df.iloc[len(sga_df)//2]['Est Physical Reads']
-            min_physical_reads = sga_df['Est Physical Reads'].min()
-            if pd.notna(current_physical_reads) and (current_physical_reads - min_physical_reads) > 1000:
-                insights.append("⚠️ [WARNING] SGA Advisory suggests increasing SGA size could reduce estimated physical reads and improve buffer cache performance.")
-        except:
-            pass
+            if 'Est Physical Reads' in sga_df.columns:
+                sga_df['Est Physical Reads'] = pd.to_numeric(
+                    sga_df['Est Physical Reads'].astype(str).str.replace(',', ''), errors='coerce'
+                )
+                # compare middle row vs min as a heuristic
+                cur_idx = len(sga_df) // 2
+                cur_val = sga_df['Est Physical Reads'].iloc[cur_idx]
+                min_val = sga_df['Est Physical Reads'].min()
+                if pd.notna(cur_val) and pd.notna(min_val) and (cur_val - min_val) > 1000:
+                    insights.append("⚠️ [WARNING] SGA Advisory suggests increasing SGA to reduce physical reads.")
+    except Exception:
+        pass
 
-    # Rule: Detect contention events (TX/TM)
-    if not data['wait_events'].empty:
-        try:
+    # Rule: Wait Events (contention detection)
+    try:
+        if not data.get('wait_events', pd.DataFrame()).empty:
             df = data['wait_events'].copy()
             df.columns = df.columns.str.strip()
-            df['% DB time'] = pd.to_numeric(df['% DB time'], errors='coerce')
-            df['Event'] = df['Event'].astype(str)
-            tx_tm_events = df[
-                df['Event'].str.lower().isin(['enq: tx - row lock contention', 'enq: tm - contention'])
-                & (df['% DB time'] > 1)
-            ]
-            if not tx_tm_events.empty:
-                listed = ', '.join(tx_tm_events['Event'])
-                insights.append(f"🔥 [CRITICAL] Contention detected: {listed} — investigate blocking sessions or DML concurrency.")
-        except:
-            pass
+            if '% DB time' in df.columns:
+                df['% DB time'] = pd.to_numeric(df['% DB time'], errors='coerce')
+                # tx/tm contention
+                tx_tm_events = df[
+                    df['Event'].str.lower().isin(['enq: tx - row lock contention', 'enq: tm - contention']) &
+                    (df['% DB time'] > 1)
+                ]
+                if not tx_tm_events.empty:
+                    listed = ', '.join(tx_tm_events['Event'].astype(str).tolist())
+                    insights.append(f"🔥 [CRITICAL] Contention detected: {listed} — investigate blocking sessions or DML concurrency.")
+    except Exception:
+        pass
 
-    # Rule: Suboptimal PGA
+    # Rule: PGA Advisory
     if not data['pga_advisory'].empty:
         try:
             pga_df = data['pga_advisory'].copy()
@@ -580,68 +683,279 @@ def get_intelligent_insights(data):
             current_time = current_row['Estd Time']
             min_time = pga_df['Estd Time'].min()
             if current_time - min_time > 10:
-                insights.append("⚠️ [WARNING] PGA Advisory suggests increasing PGA size could improve execution time.")
+                insights.append("⚠️ [WARNING] PGA Advisory suggests increasing PGA to reduce execution time.")
         except:
             pass
 
     # Rule: Idle CPU
     try:
-        if data['idle_cpu'] is not None and isinstance(data['idle_cpu'], (int, float)):
+        if data.get('idle_cpu') is not None and isinstance(data['idle_cpu'], (int, float)):
             if data['idle_cpu'] < 10:
                 insights.append(f"🔥 [CRITICAL] Very low idle CPU ({data['idle_cpu']:.1f}%) — High CPU pressure.")
             elif data['idle_cpu'] < 30:
-                insights.append(f"⚠️ [WARNING] Idle CPU below optimal level ({data['idle_cpu']:.1f}%).")
+                insights.append(f"⚠️ [WARNING] Idle CPU below optimal ({data['idle_cpu']:.1f}%).")
             else:
                 insights.append(f"✅ Idle CPU healthy at {data['idle_cpu']:.1f}%.")
-    except:
+    except Exception:
         pass
+
+    # ----------------------
+    # Robust Full Table Scan Detection (Combined Output, No Table Name)
+    # ----------------------
+    try:
+        events_df = data.get('top_sql_events', pd.DataFrame()).copy()
+        if not events_df.empty:
+            # Normalize headers
+            events_df.columns = [str(c).replace('\n', ' ').strip() for c in events_df.columns]
+
+            # Find important columns
+            sql_col = next((c for c in events_df.columns if ('SQL' in c.upper() and 'ID' in c.upper()) or c.upper() == 'SQLID'), None)
+            event_col = next((c for c in events_df.columns if 'EVENT' in c.upper()), None)
+
+            detected_list = []
+            for _, row in events_df.iterrows():
+                # Combine all cell text for pattern match
+                row_text_combined = " ".join([str(row[c]) for c in events_df.columns if pd.notna(row[c])]).lower()
+
+                # Detect FULL TABLE SCAN
+                if 'table access' in row_text_combined and 'full' in row_text_combined:
+                    sql_id = str(row[sql_col]) if sql_col and pd.notna(row.get(sql_col)) else 'N/A'
+                    event_name = str(row[event_col]) if event_col and pd.notna(row.get(event_col)) else 'N/A'
+                    detected_list.append(f"{sql_id} (Event: {event_name})")
+
+            # Single combined message
+            if detected_list:
+                insights.append(
+                    f"⚠️ The following SQL_IDs are performing FULL TABLE SCANS — review execution plans and indexing: {', '.join(detected_list)}"
+                )
+
+    except Exception as e:
+        print("Full table scan detection error:", e)
+
 
     return insights
 
 
+# 🧩 NEW — Add this below get_intelligent_insights()
+def build_analyzer_summary(data, insights):
+    """
+    Builds a complete summary of the AWR Analyzer output — including key metrics,
+    insights, and top sections — to feed into Mistral AI.
+    """
+    lines = []
+    append = lines.append
+
+    append("=== AWR Analyzer Summary ===")
+
+    # --- General Info ---
+    append(f"Database Name: {data.get('db_name', 'N/A')}")
+    append(f"Instance: {data.get('instance_name', 'N/A')} #{data.get('instance_num', 'N/A')}")
+    append(f"Edition/Release: {data.get('edition', 'N/A')}")
+    append(f"Platform: {data.get('platform', 'N/A')}")
+    append(f"Memory (GB): {data.get('memory_gb', 'N/A')}")
+    append(f"Total CPUs: {data.get('total_cpu', 'N/A')}")
+    append(f"Idle CPU (%): {data.get('idle_cpu', 'N/A')}")
+    append(f"RAC: {data.get('rac_status', 'N/A')}")
+    append(f"CDB: {data.get('cdb_status', 'N/A')}")
+    append(f"Begin Snap: {data.get('begin_snap_time', 'N/A')}")
+    append(f"End Snap: {data.get('end_snap_time', 'N/A')}")
+
+    # --- Load Profile ---
+    lp = data.get("load_profile", pd.DataFrame())
+    if not lp.empty:
+        append("\n--- Load Profile (Per Second) ---")
+        append(lp.head(10).to_string(index=False))
+
+    # --- Wait Events ---
+    we = data.get("wait_events", pd.DataFrame())
+    if not we.empty:
+        append("\n--- Top Wait Events (% DB Time) ---")
+        append(we.head(10).to_string(index=False))
+
+    # --- Top SQLs ---
+    ts = data.get("top_sql", pd.DataFrame())
+    if not ts.empty:
+        append("\n--- Top SQL by Elapsed Time ---")
+        append(ts.head(10).to_string(index=False))
+
+    cpu_sql = data.get("top_cpu_sql", pd.DataFrame())
+    if not cpu_sql.empty:
+        append("\n--- Top SQL by CPU Time ---")
+        append(cpu_sql.head(10).to_string(index=False))
+
+    # --- PGA / SGA Advisory ---
+    pga = data.get("pga_advisory", pd.DataFrame())
+    if not pga.empty:
+        append("\n--- PGA Advisory ---")
+        append(pga.head(5).to_string(index=False))
+
+    sga = data.get("sga_advisory", pd.DataFrame())
+    if not sga.empty:
+        append("\n--- SGA Advisory ---")
+        append(sga.head(5).to_string(index=False))
+
+    # --- Segments ---
+    segs = {
+        "Segments by Physical Reads": data.get("seg_physical_reads", pd.DataFrame()),
+        "Segments by Row Lock Waits": data.get("seg_row_lock_waits", pd.DataFrame()),
+        "Segments by Table Scans": data.get("seg_table_scans", pd.DataFrame()),
+    }
+    for title, df in segs.items():
+        if not df.empty:
+            append(f"\n--- {title} ---")
+            append(df.head(5).to_string(index=False))
+
+    # --- Intelligent Insights ---
+    if insights:
+        append("\n--- Intelligent Insights ---")
+        for ins in insights:
+            append(f"- {ins}")
+
+    return "\n".join(lines)
+
+
+
+# ============================================
+# MAIN APP DISPLAY (Existing Analyzer Features)
+# ============================================
+
+# ========================
+# MAIN APP DISPLAY
+# ========================
 
 # Upload file - Main uploader
-uploaded_files = st.file_uploader("📤 Upload AWR HTML reports", type="html", accept_multiple_files=True, key="main_uploader")
+uploaded_files = st.file_uploader(
+    "📤 Upload AWR HTML reports",
+    type="html",
+    accept_multiple_files=True,
+    key="main_uploader"
+)
 
 if not uploaded_files:
-    st.info("Please upload one or more AWR HTML reports to parse.")
     st.stop()
 
-# Build list of file names
+# ✅ Parse the first uploaded AWR file into `data`
+selected_html = uploaded_files[0].getvalue().decode("utf-8", errors="ignore")
+data = parse_awr(selected_html)
+
+# ✅ Generate intelligent insights
+insights = get_intelligent_insights(data)
+
+# ✅ Continue with your existing AWR analyzer features:
+# (AWR Info, Load Profile, Wait Events, Top SQLs, Segments, Comparisons, etc.)
 file_names = [file.name for file in uploaded_files]
+selected_file = file_names[0]
+
+# ==========================================
+# 🤖 Mistral AI AWR Issue Analyzer (Technical + Guided + Dynamic DBA Checklist)
+# ==========================================
+st.markdown("### 💬 Describe Your Performance Issue or Ask a Technical Question")
+
+user_issue = st.text_area(
+    "Example: 'Why is log file sync wait high?', 'Why is CPU usage high?', 'Which SQL causes high I/O?'",
+    placeholder="Type your production performance issue or AWR-related question...",
+    height=120,
+)
+
+if st.button("🧠 Run Mistral AI AWR Analysis"):
+    try:
+        # ✅ Load the uploaded AWR report and parse it
+        selected_html = uploaded_files[0].getvalue().decode("utf-8", errors="ignore")
+        parsed_data = parse_awr(selected_html)
+
+        # ✅ Build the analyzer summary (parsed + insights)
+        analyzer_summary = build_analyzer_summary(parsed_data, insights)
+
+        # ✅ Combine the parsed analyzer output and raw AWR HTML into a single hybrid context
+        # We merge both sources, not show them separately
+        combined_awr_context = f"""
+=== ORACLE AWR PERFORMANCE CONTEXT ===
+
+Below is a combined and enriched representation of the Oracle AWR data.
+It includes both structured analyzer metrics and embedded raw AWR report details for full fidelity.
+
+{analyzer_summary}
+
+--- Embedded AWR Raw Report (Full HTML/Text Context) ---
+{selected_html}
+"""
+
+        # 🧠 Unified prompt for Mistral
+        prompt = f"""
+You are an **Oracle Database Performance Engineer** with over 15 years of experience in analyzing Oracle AWR reports.
+
+You have access to a unified Oracle AWR performance dataset below (which combines the structured AWR Analyzer metrics with the embedded raw AWR report content). 
+Use this combined data to produce a **single, cohesive analysis** — not separate summaries.
+
+🎯 **User Issue / Question:**
+{user_issue}
+
+📊 **Unified AWR Data Context (Analyzer + Raw Report Combined):**
+{combined_awr_context}
+
+🧩 **Response Guidelines:**
+1. Provide one unified technical explanation that merges findings from both the raw and parsed AWR data.
+2. Correlate findings between raw AWR report text and the parsed analyzer output.
+3. Provide a technical, expert-level output, similar to what an Oracle DBA or Oracle Performance Tuning specialist would deliver.
+4. Be Clear: Use simple sentences suitable for beginner DBAs.
+5. Be Focused: Only discuss AWR data relevant to the user's issue.
+6. Be cautious and avoid making any risky changes since this is a production database
+7. Be Guided: For each relevant AWR section, explain:
+   - Which section to look at
+   - Why it’s relevant
+   - What exactly to check
+   - How to interpret the values safely
+8. Suggest which sections of both the should be reviewed for further analysis. For example, specify which section to focus on for deeper insights. 
+9. Include technical recommendations based on the findings.
+10. Provide relevant website links with proper URLs for reference its recommended i want this.
 
 
-# Select report to view
-selected_file = st.selectbox("Select an AWR report to view:", file_names, key="select_main_report")
+💬 **Output Format:**
 
-# 🔁 Reset SQL Text expander state if new file selected
-if "last_uploaded_file" not in st.session_state:
-    st.session_state.last_uploaded_file = ""
+**Technical Analysis:**  
+(Explain the likely cause, observed patterns, and cross-validated findings from both AWR sources.)
 
-if selected_file != st.session_state.last_uploaded_file:
-    st.session_state.sql_expander_open = False
-    st.session_state.last_uploaded_file = selected_file
+**Guided Steps for the DBA:**  
+- <Section>: <why it matters, what to review, how to interpret safely>  
+- <Section>: <why it matters, what to review, how to interpret safely>  
+
+**Recommendations and References:**  
+(Provide tuning suggestions, Oracle doc links, and safe operational guidance.)
+
+**Safety Note:**  
+Always verify any tuning recommendations in a test or staging environment before applying them to production.
+"""
+
+        # Keep within Mistral’s token safety limit
+        if len(prompt) > 120000:
+            st.warning("⚠️ Combined AWR data is very large; trimming slightly to fit model context limits.")
+            prompt = prompt[:120000]
+
+        with st.spinner("🤖 Mistral AI is analyzing your combined AWR report data..."):
+            ai_output = ai_generate(prompt)
+
+        st.markdown("### 🧠 Mistral AI Unified AWR Performance Analysis")
+        st.info("Below is a **single, cohesive analysis** that merges both raw AWR and parsed analyzer data:")
+        st.success(ai_output)
+
+        st.download_button(
+            label="📄 Download Unified AI Analysis",
+            data=ai_output,
+            file_name=f"AWR_AI_Combined_Analysis_{user_issue[:30].replace(' ', '_')}.txt",
+            mime="text/plain"
+        )
+
+    except Exception as e:
+        st.error(f"⚠️ Error running Mistral AI Analysis: {e}")
 
 
-# Find and parse selected file
-data = None
-for uploaded in uploaded_files:
-    if uploaded.name == selected_file:
-        html = uploaded.getvalue().decode('utf-8')
-        try:
-            data = parse_awr(html)
-            insights = get_intelligent_insights(data)  # ✅ Add here
-        except Exception as e:
-            st.error(f"Error parsing AWR report: {e}")
-            data = None
-        break
 
-if data:
-    st.subheader(f"📄 Report: {selected_file}")
-    st.write(f"**Database Name:** {data['db_name']}")
-else:
-    st.error("Failed to parse the selected AWR report. Please check the file.")
-    st.stop()
+
+
+
+
+
+
 
 
 # ---------------- Side-by-side Comparison Feature ---------------- #
@@ -861,7 +1175,17 @@ if not lp.empty and lp['Metric'].astype(str).str.contains('DB Time').any():
     row = lp[lp['Metric'].astype(str).str.contains('DB Time')]
     db_time = row['Per Second'].iloc[0]
 
-# AWR Summary
+# AWR Summary – Card UI + Observations
+cpu_count = int(data['total_cpu']) if str(data['total_cpu']).isdigit() else 0
+db_time = 0
+try:
+    db_time = float(
+        data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0]
+    )
+except:
+    db_time = 0
+idle_cpu = float(data['idle_cpu']) if data['idle_cpu'] is not None else None
+
 st.markdown("""
 <div style='margin-top: 2rem; margin-bottom: 1rem; padding: 1rem; background: linear-gradient(to right, #f7971e, #ffd200); border-radius: 10px;'>
     <h4 style='color:#222; margin: 0;'>🛠️ AWR Environment Info</h4>
@@ -883,8 +1207,8 @@ st.markdown("""
 </div>
 """.format(
     cpu=data['total_cpu'],
-    db_time=data['load_profile'][data['load_profile']['Metric'].str.contains("DB Time", na=False)]['Per Second'].values[0] if not data['load_profile'].empty else "N/A",
-    idle=f"{data['idle_cpu']:.1f}" if data['idle_cpu'] is not None else "N/A",
+    db_time=f"{db_time:.1f}" if db_time else "N/A",
+    idle=f"{idle_cpu:.1f}" if idle_cpu is not None else "N/A",
     rac=data['rac_status'],
     edition=data['edition'],
     memory=data['memory_gb'],
@@ -899,6 +1223,68 @@ st.markdown("""
 
 
 
+
+
+
+with st.expander("View Observations & Recommendations"):
+
+    # 1. CPU Usage
+    if idle_cpu is not None:
+        if idle_cpu > 70:
+            st.markdown(f"""
+**🟢 1. CPU Usage (Idle CPU: {idle_cpu:.1f}%) — Sufficient Capacity**  
+✅ **Observation:** Idle CPU is **{idle_cpu:.1f}%** — system has **sufficient CPU capacity**.
+
+**💡 Recommendation:**  
+- No action needed now.  
+- Monitor for spikes or inefficient SQL if idle drops below 30%.
+""")
+        elif idle_cpu < 30:
+            st.markdown(f"""
+**🔥 1. CPU Usage (Idle CPU: {idle_cpu:.1f}%) — High CPU Pressure**  
+⚠️ **Observation:** Idle CPU is **{idle_cpu:.1f}%**, indicating **high CPU pressure**.
+
+**💡 Recommendation:**  
+- Review **Top SQL by CPU Time** to identify CPU-heavy queries.  
+- Use the **Wait Events** section to detect `CPU + Wait for CPU`.  
+- Check for **high hard parse rate**; use bind variables to reduce parsing.  
+- Investigate **background processes or external workloads** consuming CPU. 
+""")
+        else:
+            st.markdown(f"""
+**⚠️ 1. CPU Usage (Idle CPU: {idle_cpu:.1f}%) — Moderate Load**  
+🟡 **Observation:** Idle CPU is **{idle_cpu:.1f}%** — system is under **moderate CPU load**.
+
+**💡 Recommendation:**  
+- Monitor for downward trends toward critical usage.  
+- Investigate **moderately expensive SQLs** from the **Top SQL by CPU Time** section.  
+- Ensure background jobs or batch processes are optimized.
+""")
+    else:
+        st.markdown("**❓ 1. CPU Usage — Data Unavailable**")
+
+    # 2. DB Time (Avg Active Session)
+    DB_TIME_THRESHOLD = 40
+
+    if db_time > DB_TIME_THRESHOLD:
+        st.markdown(f"""
+**⚠️ 2. Avg Active Session ({db_time:.1f}s) — High**  
+⚠️ **Observation:** AAS is **{db_time:.1f}s**, which may indicate **performance bottlenecks**.
+
+**💡 Recommendation:**  
+- Investigate queries in **Top SQL by Elapsed**.  
+- Check for concurrency, locking, or resource contention.
+""")
+    else:
+        st.markdown(f"""
+**✅ 2. Avg Active Session ({db_time:.1f}s) — Normal**  
+✅ **Observation:** AAS is **{db_time:.1f}s**, within the acceptable range.
+""")
+
+
+
+
+
 # 🧠 Intelligent Insights
 st.markdown("### 🧠 Intelligent Insights")
 if insights:
@@ -906,6 +1292,7 @@ if insights:
         st.success(insight)
 else:
     st.info("✅ No major anomalies or tuning issues detected.")
+
 
 
 # ✅ Jump to Section (Full Navigation)
@@ -930,7 +1317,9 @@ st.markdown("""
 
 
 # Load Profile
+st.markdown('<div id="load-profile"></div>', unsafe_allow_html=True)
 st.markdown("### 📊 Load Profile (Per Second)")
+
 if not data['load_profile'].empty:
     fig1 = px.bar(data['load_profile'], x='Metric', y='Per Second', title='Load Profile', color='Metric', text='Per Second')
     fig1.update_traces(texttemplate='%{text}', textposition='outside')
@@ -940,73 +1329,244 @@ else:
     st.warning("Load Profile table not found.")
 
 # Wait Events
-st.markdown("### ⏳ Top 5 Wait Events (% DB time)")
-if not data['wait_events'].empty:
-    fig2 = px.bar(data['wait_events'], x='Event', y='% DB time', title='Wait Events', color='Event', text='% DB time')
-    fig2.update_traces(texttemplate='%{text}', textposition='outside')
+# Wait Event Insights
+wait_event_insights = {
+    "db file sequential read": {
+        "observation": "This wait event indicates that Oracle is performing single-block reads, typically due to index access. High occurrences may suggest inefficient query plans or suboptimal indexing.",
+        "recommendation": "Review index usage and execution plans. Ensure appropriate indexes are in place. If this wait event contributes significantly to DB time, also verify that the SGA is properly sized and configured."
+    },
+    "db file scattered read": {
+        "observation": "The db file scattered read wait event occurs when Oracle performs multiblock reads—typically during full table scans.",
+        "recommendation": "Review SQL causing full table scans. Add proper indexes or rewrite queries. Update statistics and check I/O performance for large table scans."
+    },
+    "db file parallel read": {
+        "observation": "Multiple block reads initiated in parallel, often during recovery, backups, or parallel queries.",
+        "recommendation": "Check if parallel query or RMAN is running. Tune I/O subsystem and review execution plans for parallel reads. Avoid unnecessary parallelism if not needed."
+    },
+    "log file sync": {
+        "observation": "This wait event happens when a session commits and waits for the LGWR (Log Writer) process to flush the redo log buffer to the redo log files on disk.",
+        "recommendation": "Reduce frequent commits in application code. Investigate redo log disk I/O performance."
+    },
+    "log file switch (checkpoint incomplete)": {
+        "observation": "This wait occurs when a log switch is attempted, but the next online redo log group is not yet available because a checkpoint has not completed for it.",
+        "recommendation": "Add more online redo log groups or increase their size."
+    },
+    "log file parallel write": {
+        "observation": "Time taken by LGWR to write redo log entries to disk.",
+        "recommendation": "Check I/O performance of the disks hosting redo logs."
+    },
+    "direct path read": {
+        "observation": "Used for reading directly into PGA, often during parallel queries or temp reads.",
+        "recommendation": "Check temp usage and parallel query settings. Tune SQLs causing large direct reads. Ensure I/O subsystem can handle large read operations efficiently."
+    },
+    "direct path write": {
+        "observation": "Occurs during parallel DML operations or sorts spilling to temp.",
+        "recommendation": "Check temp file I/O performance and tune large parallel DML operations."
+    },
+    "TCP Socket (KGAS)": {
+        "observation": "This wait event occurs when Oracle is waiting for TCP/IP network communication.",
+        "recommendation": "Check network latency, listener configuration, remote DB responsiveness."
+    },
+    "enq: TX - row lock contention": {
+        "observation": "This wait event occurs when a session is waiting to acquire a row-level lock that is already held by another session.",
+        "recommendation": "Identify and tune blocking sessions. Avoid DML conflicts on the same rows from multiple sessions."
+    },
+    "enq: TM - contention": {
+        "observation": "This wait event occurs when a session waits for a DML or DDL lock on a table that’s held by another session.",
+        "recommendation": "Avoid unnecessary DDL. Avoid using APPEND hint in concurrent inserts, as it causes table-level locks."
+    },
+    "resmgr: cpu quantum": {
+        "observation": "Oracle is controlling CPU usage, and a session must wait for its turn to use the CPU again because it has used up its time slice.",
+        "recommendation": "Check and tune top CPU-consuming queries. Investigate system CPU usage at the OS level."
+    },
+    "read by other session": {
+        "observation": "Buffer busy waits due to concurrent access by multiple sessions.",
+        "recommendation": "Use partitioning or tune queries to reduce contention on hot blocks."
+    },
+    "buffer busy wait": {
+        "observation": "Waits for access to data blocks in buffer cache.",
+        "recommendation": "Tune SQL to reduce concurrent access. Reduce contention by spreading workload or partitioning."
+    },
+    "library cache lock": {
+        "observation": "This wait event occurs when a session is waiting for a lock on an object in the library cache.",
+        "recommendation": "Avoid DDL during peak load. Use bind variables to reduce parse load."
+    },
+    "cursor: pin S wait on X": {
+        "observation": "Library cache concurrency when multiple sessions access cursors. Often due to invalidations.",
+        "recommendation": "Reduce literal SQL usage. Use bind variables. Minimize DDL during business hours."
+    },
+    "Failed Logon Delay": {
+        "observation": "Wait caused by failed login attempts.",
+        "recommendation": "Review audit logs. Investigate authentication issues or invalid credentials."
+    },
+    "row cache lock": {
+        "observation": "This wait indicates contention in the data dictionary cache (row cache), typically due to DDL operations or frequent hard parsing.",
+        "recommendation": "Minimize DDLs and hard parsing during peak hours by using bind variables."
+    },
+    "direct path read temp": {
+        "observation": "Frequent 'direct path read temp' waits suggest large operations are spilling to temp due to insufficient PGA or inefficient execution plans.",
+        "recommendation": "Increase PGA memory if required and tune queries to minimize temp usage."
+    },
+    "direct path write temp": {
+        "observation": "'Direct path write temp' occurs when large operations write data to temporary tablespaces, often due to sorts or hash joins exceeding memory.",
+        "recommendation": "Increase PGA memory if required and tune queries to minimize temp usage."
+    },
+    "enq: UL – contention": {
+        "observation": "A significant number of 'enq: UL – contention' waits indicates user-defined locks are competing, causing sessions to block or wait during DB operations.",
+        "recommendation": "Avoid long-held user locks; review DBMS_LOCK usage and identify blocking sessions via v$session or dba_lock_internal."
+    },
+    "latch: shared pool": {
+        "observation": "The latch: shared pool wait event occurs when a session is waiting to acquire a latch to access the shared pool area of the SGA.",
+        "recommendation": "Reduce hard parses by using bind variables instead of literals."
+    },
+    "library cache load lock": {
+        "observation": "The library cache load lock wait event occurs when sessions wait for objects to be loaded into the library cache, often due to high hard parses, frequent DDL, or shared pool pressure."
+    },
+    "enq: CF - contention": {
+        "observation": "The enq: CF - contention wait event occurs when sessions compete for control file access, typically due to frequent updates from checkpoints, log switches, or backups. If it appears in the top wait events with high DB Time consumption, it may significantly impact database operations that rely on control file metadata."
+    }
+}
+
+
+
+# ✅ Wait Event Visualization and Insights
+st.markdown("### ⏳ Top 5 Wait Events (% DB Time)")
+
+if 'wait_events' in data and isinstance(data['wait_events'], pd.DataFrame) and not data['wait_events'].empty:
+    df_waits = data['wait_events'].copy()
+    df_waits.columns = df_waits.columns.str.strip()
+
+    # Bar chart
+    fig2 = px.bar(
+        df_waits.head(5),  # Top 5 only
+        x='Event',
+        y='% DB time',
+        title='Top 5 Wait Events by % DB Time',
+        color='Event',
+        text='% DB time'
+    )
+    fig2.update_traces(texttemplate='%{text:.1f}', textposition='outside')
     fig2.update_layout(yaxis_title="", xaxis_title="", plot_bgcolor='#f0f8ff')
     st.plotly_chart(fig2, use_container_width=True)
-else:
-    st.warning("Wait Events table not found.")
 
-# 🔥 Top SQL by Elapsed Time
+    # Insights styled like your screenshot
+    with st.expander("View Observations & Recommendations"):
+        shown_any = False
+        for idx, (_, row) in enumerate(df_waits.head(5).iterrows(), 1):
+            event_name = row['Event']
+            db_time_pct = row['% DB time']
+
+            if event_name in wait_event_insights:
+                shown_any = True
+                insight = wait_event_insights[event_name]
+                recommendations = insight["recommendation"]
+
+                st.markdown(
+                    f"""<div style="border:1px solid #ccc;padding:10px;border-radius:8px;margin-bottom:10px;">
+                    <h4 style="margin:0;">🟢 {idx}. {event_name} ({db_time_pct:.1f}% DB Time)</h4>
+                    <p><strong>✅ Observation:</strong> {insight['observation']}</p>
+                    <p><strong>💡 Recommendation:</strong></p>
+                    <ul>
+                    {"".join(f"<li>{rec}</li>" for rec in (recommendations if isinstance(recommendations, list) else [recommendations]))}
+                    </ul>
+                    </div>""",
+                    unsafe_allow_html=True
+                )
+
+        if not shown_any:
+            st.info("ℹ️ No insights available for the Top 5 wait events in this report.")
+else:
+    st.warning("⚠️ Wait Events table not found or is empty.")
+
+
+
+
+
+
+
+# --------------------------------------------
+# 🐢 Top SQL by Elapsed Time Section (New Code)
+# --------------------------------------------
 st.markdown("### 🔥 Top SQL by Elapsed Time")
 
-if not data['top_sql'].empty:
+if 'top_sql' in data and isinstance(data['top_sql'], pd.DataFrame) and not data['top_sql'].empty:
     df_top_sql = data['top_sql'].copy()
 
-    # Normalize column names
-    df_top_sql.columns = df_top_sql.columns.str.strip().str.upper()
+    # Normalize column names: strip spaces, uppercase, remove duplicate spaces
+    df_top_sql.columns = df_top_sql.columns.str.strip().str.upper().str.replace(r'\s+', ' ', regex=True)
 
-    # Required columns
-    required_columns = ['SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)']
+    # Map possible variations of column names to standard ones
+    rename_map = {
+        'SQL ID': 'SQL ID',
+        'SQLID': 'SQL ID',
+        'SQL Id': 'SQL ID',
+        'SQL TEXT': 'SQL TEXT',
+        'ELAPSED TIME (S)': 'ELAPSED TIME (S)',
+        'ELAPSED TIME PER EXEC (S)': 'ELAPSED TIME PER EXEC (S)',
+        'EXECUTIONS': 'EXECUTIONS'
+    }
+    df_top_sql.rename(columns=rename_map, inplace=True)
+
+    required_columns = ['SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)', 'EXECUTIONS', 'ELAPSED TIME PER EXEC (S)']
+
     if all(col in df_top_sql.columns for col in required_columns):
-
-        # Parse elapsed time
+        # Convert numeric columns
         df_top_sql['ELAPSED TIME (S)'] = pd.to_numeric(df_top_sql['ELAPSED TIME (S)'], errors='coerce')
+        df_top_sql['EXECUTIONS'] = pd.to_numeric(df_top_sql['EXECUTIONS'], errors='coerce').fillna(0).astype(int)
+        df_top_sql['ELAPSED TIME PER EXEC (S)'] = pd.to_numeric(df_top_sql['ELAPSED TIME PER EXEC (S)'], errors='coerce')
 
-        # Create a unique label for Y-axis
-        df_top_sql['LABEL'] = df_top_sql['SQL ID'].astype(str) + " | " + df_top_sql['SQL TEXT'].astype(str).str.slice(0, 50) + '...'
-
-        # Plot with improved dark red gradient
+        # Create bar chart using SQL ID directly for y-axis
         fig_elapsed = px.bar(
             df_top_sql.sort_values('ELAPSED TIME (S)'),
-            y='LABEL',
+            y='SQL ID',
             x='ELAPSED TIME (S)',
             orientation='h',
             text='ELAPSED TIME (S)',
             title='Top SQL by Elapsed Time',
             color='ELAPSED TIME (S)',
-            color_continuous_scale=["#800000", "#B22222", "#DC143C", "#FF6347"]
+            color_continuous_scale=["#800000", "#B22222", "#DC143C", "#FF6347"],
+            hover_data={
+                'SQL ID': True,
+                'SQL TEXT': True,
+                'ELAPSED TIME (S)': True,
+                'EXECUTIONS': True,
+                'ELAPSED TIME PER EXEC (S)': True
+            }
         )
 
         fig_elapsed.update_layout(
-            yaxis_title="SQL ID | SQL Text",
+            yaxis_title="SQL ID",
             xaxis_title="Elapsed Time (s)",
             plot_bgcolor='#fffaf0',
-            margin=dict(l=10, r=10, t=40, b=10),
-            height=40 * len(df_top_sql),   # Ensure enough height per bar
-            uniformtext_mode='show'        # Force labels to render
-        )
-
-        fig_elapsed.update_traces(
-            texttemplate='%{text:.2f}',
-            textposition='outside',
-            hovertemplate="<b>Elapsed Time (s):</b> %{x}<br><b>SQL:</b> %{y}<extra></extra>"
+            height=40 * len(df_top_sql)
         )
 
         st.plotly_chart(fig_elapsed, use_container_width=True)
 
+        # Observation & Recommendation
+        with st.expander("View Observations & Recommendations"):
+            st.markdown("""
+**📝 Observation:**  
+This section lists SQL statements that consumed the most **elapsed time** during the snapshot period. High elapsed time often indicates that these SQLs are either long-running or executed very frequently, significantly affecting database performance.
+
+**✅ Recommendations:**  
+- **Check ELAPSED TIME (S) and ELAPSED TIME PER EXEC (S) to see if queries are slow. If very high, follow the recommendations below.**
+- **Review execution plans** using DBMS_XPLAN.DISPLAY_CURSOR.
+- **Tune inefficient SQLs**: Look for full table scans, bad join orders, missing indexes.
+- **Stabilize plans** with SQL Plan Baselines if plans change frequently and fix the good plan.
+            """)
     else:
-        st.error("Required columns ('SQL ID', 'SQL TEXT', 'ELAPSED TIME (S)') not found in Top SQL by Elapsed Time data.")
+        st.error(f"❌ Required columns not found. Found columns: {df_top_sql.columns.tolist()}")
 else:
-    st.warning("Top SQL by Elapsed Time not found.")
+    st.warning("⚠️ 'Top SQL by Elapsed Time' data not found or is empty.")
+
+
+
 
 
 
 
 # Top SQL by CPU Time (Graphical)
-
 st.markdown("### ⚡ Top SQL by CPU Time")
 
 if not data['top_cpu_sql'].empty:
@@ -1022,42 +1582,65 @@ if not data['top_cpu_sql'].empty:
         # Parse CPU Time column safely
         df_cpu_sql['CPU TIME (S)'] = pd.to_numeric(df_cpu_sql['CPU TIME (S)'], errors='coerce')
 
-        # Label: SQL ID with truncated SQL text
-        df_cpu_sql['LABEL'] = df_cpu_sql['SQL ID'].astype(str) + " | " + df_cpu_sql['SQL TEXT'].str.slice(0, 50) + '...'
-
-        # Improved Bar Chart with Darker Blue Gradient
+        # Bar Chart using only SQL ID for Y-axis
         fig_cpu = px.bar(
             df_cpu_sql.sort_values('CPU TIME (S)'),
-            y='LABEL',
+            y='SQL ID',
             x='CPU TIME (S)',
             orientation='h',
             text='CPU TIME (S)',
             title='Top SQL by CPU Time',
             color='CPU TIME (S)',
-            color_continuous_scale=["#00008B", "#0000CD", "#4169E1", "#6495ED", "#87CEFA"]
+            color_continuous_scale=["#00008B", "#0000CD", "#4169E1", "#6495ED", "#87CEFA"],
+            hover_data={
+                'SQL ID': True,
+                'SQL TEXT': True,
+                'CPU TIME (S)': True
+            }
         )
 
         fig_cpu.update_layout(
-            yaxis_title="SQL ID | SQL Text",
+            yaxis_title="SQL ID",
             xaxis_title="CPU Time (s)",
             plot_bgcolor='#f8ffff',
             margin=dict(l=10, r=10, t=40, b=10),
-            height=40 * len(df_cpu_sql),   # Ensure enough height per bar
-            uniformtext_mode='show'        # Force labels to render
+            height=40 * len(df_cpu_sql),
+            uniformtext_mode='show'
         )
 
         fig_cpu.update_traces(
             texttemplate='%{text:.2f}',
-            textposition='outside',
-            hovertemplate="<b>CPU Time (s):</b> %{x}<br><b>SQL:</b> %{y}<extra></extra>"
+            textposition='outside'
         )
 
         st.plotly_chart(fig_cpu, use_container_width=True)
+
+        # ✅ Observation and Recommendation in dropdown
+        max_cpu = df_cpu_sql['CPU TIME (S)'].max()
+        if max_cpu > 10:
+            with st.expander("View Observation and Recommendation"):
+                st.markdown(f"""
+**🧠 Observation:**  
+This section highlights the SQL statements that consumed the most CPU time during the snapshot period. High CPU usage typically indicates that these SQLs are resource-intensive and may significantly affect overall database performance. If the idle CPU percentage is very low and CPU resources are exhausted, check the recommendations below.
+
+💡 **Recommendation:**
+- Check top CPU consuming queries. If CPU time(s) very high, follow the recommendations below.
+- Investigate whether parallel execution is appropriate for these queries.
+- Review execution plans for high CPU-consuming SQLs.
+- Tune SQL logic and access paths (joins, filters, indexes).
+- Use bind variables and avoid unnecessary computations in queries.
+- Check if there is another OS-level process consuming more CPU. 
+""")
+        else:
+            st.markdown("✅ No SQLs with significant CPU usage detected.")
 
     else:
         st.error("Required columns ('SQL ID', 'SQL TEXT', 'CPU TIME (S)') not found in Top SQL by CPU Time data.")
 else:
     st.warning("Top SQL by CPU Time not found.")
+
+
+
 
 
 
@@ -1106,6 +1689,8 @@ with st.expander("📊 Segments by Physical Reads", expanded=False):
         chart_df = data['seg_physical_reads'].copy()
         chart_df['Physical Reads'] = chart_df['Physical Reads'].replace(',', '', regex=True)
         chart_df['Physical Reads'] = pd.to_numeric(chart_df['Physical Reads'], errors='coerce')
+
+        # Bar chart
         fig = px.bar(
             chart_df.sort_values(by='Physical Reads', ascending=False).head(10),
             x='Object Name',
@@ -1114,12 +1699,36 @@ with st.expander("📊 Segments by Physical Reads", expanded=False):
             color_discrete_sequence=["#3498db"]
         )
         fig.update_traces(textposition='outside')
-        fig.update_layout(title="Top 10 Segments by Physical Reads", xaxis_title="Object Name", yaxis_title="Physical Reads",
-                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_layout(
+            title="Top 10 Segments by Physical Reads",
+            xaxis_title="Object Name",
+            yaxis_title="Physical Reads",
+            plot_bgcolor="#f8f9fa",
+            paper_bgcolor="#ffffff",
+            showlegend=False
+        )
         fig.update_xaxes(tickangle=-45)
         st.plotly_chart(fig, use_container_width=True)
+
+        # Nested dropdown for Observation & Recommendation
+        with st.expander("View Observation and Recommendation", expanded=False):
+            st.markdown(
+                """
+                ### 📦 **Observation**  
+                Some database segments are responsible for high physical reads, indicating frequent disk access and potential I/O bottlenecks during the snapshot period. If the physical read wait event is consistently observed in the Wait Events section, review the Segments by Physical Reads section to identify which segments have higher physical reads, and check the recommendations below.
+                
+                ### 💡 **Recommendation**  
+                - Review execution plans for SQL statements that access high physical read tables to avoid unnecessary full table scans.  
+                - Optimize indexes and ensure table/index statistics are up to date.  
+                - Consider partitioning large tables for better I/O performance.  
+                - Increase the SGA size if required, as indicated by the SGA Advisory, to help reduce I/O.  
+                """
+            )
+
     else:
         st.warning("Segments by Physical Reads section not found.")
+
+
 
 # Segments by Row Lock Waits
 st.markdown('<div id="segments-by-row-lock-waits"></div>', unsafe_allow_html=True)
@@ -1129,17 +1738,44 @@ with st.expander("📊 Segments by Row Lock Waits", expanded=False):
         chart_df = data['seg_row_lock_waits'].copy()
         chart_df['Row Lock Waits'] = chart_df['Row Lock Waits'].replace(',', '', regex=True)
         chart_df['Row Lock Waits'] = pd.to_numeric(chart_df['Row Lock Waits'], errors='coerce')
+
+        # Bar chart
         fig = px.bar(
             chart_df.sort_values(by='Row Lock Waits', ascending=False).head(10),
-            x='Object Name', y='Row Lock Waits', text='Row Lock Waits', color_discrete_sequence=["#3498db"]
+            x='Object Name',
+            y='Row Lock Waits',
+            text='Row Lock Waits',
+            color_discrete_sequence=["#3498db"]
         )
         fig.update_traces(textposition='outside')
-        fig.update_layout(title="Top Segments by Row Lock Waits", xaxis_title="Object Name", yaxis_title="Row Lock Waits",
-                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_layout(
+            title="Top Segments by Row Lock Waits",
+            xaxis_title="Object Name",
+            yaxis_title="Row Lock Waits",
+            plot_bgcolor="#f8f9fa",
+            paper_bgcolor="#ffffff",
+            showlegend=False
+        )
         fig.update_xaxes(tickangle=-45)
         st.plotly_chart(fig, use_container_width=True)
+
+        # Nested dropdown for Observation & Recommendation
+        with st.expander("View Observation and Recommendation", expanded=False):
+            st.markdown(
+                """
+                ### 📦 **Observation**  
+                Certain database segments are experiencing elevated row lock waits, indicating contention from concurrent DML operations attempting to modify the same rows simultaneously. This can lead to blocking sessions and reduced transaction throughput. If contention is observed in the database, this section can help identify the tables involved. You can then determine which queries are accessing these tables to gain insight into the cause, and checkthe recommendations below. In some cases, this section(Top SQL with Top Events) also captures which wait events occurred in specific SQL statements, allowing further analysis.
+                
+                ### 💡 **Recommendation**  
+                - Identify SQL statements causing the highest row lock waits using ASH/AWR SQL details.  
+                - Redesign application logic to minimize concurrent updates/deletes on the same rows at the same time.  
+                - Add appropriate indexes if queries are performing full table scans.  
+                """
+            )
+
     else:
         st.warning("Segments by Row Lock Waits section not found.")
+
 
 # Segments by Table Scans
 st.markdown('<div id="segments-by-table-scans"></div>', unsafe_allow_html=True)
@@ -1149,15 +1785,42 @@ with st.expander("📊 Segments by Table Scans", expanded=False):
         chart_df = data['seg_table_scans'].copy()
         chart_df['Table Scans'] = chart_df['Table Scans'].replace(',', '', regex=True)
         chart_df['Table Scans'] = pd.to_numeric(chart_df['Table Scans'], errors='coerce')
+
+        # Bar chart
         fig = px.bar(
             chart_df.sort_values(by='Table Scans', ascending=False).head(10),
-            x='Object Name', y='Table Scans', text='Table Scans', color_discrete_sequence=["#e67e22"]
+            x='Object Name',
+            y='Table Scans',
+            text='Table Scans',
+            color_discrete_sequence=["#e67e22"]
         )
         fig.update_traces(textposition='outside')
-        fig.update_layout(title="Top Segments by Table Scans", xaxis_title="Object Name", yaxis_title="Table Scans",
-                          plot_bgcolor="#f8f9fa", paper_bgcolor="#ffffff", showlegend=False)
+        fig.update_layout(
+            title="Top Segments by Table Scans",
+            xaxis_title="Object Name",
+            yaxis_title="Table Scans",
+            plot_bgcolor="#f8f9fa",
+            paper_bgcolor="#ffffff",
+            showlegend=False
+        )
         fig.update_xaxes(tickangle=-45)
         st.plotly_chart(fig, use_container_width=True)
+
+        # Observation & Recommendation dropdown
+        with st.expander("View Observation and Recommendation", expanded=False):
+            st.markdown(
+                """
+                ### 📦 **Observation**  
+                Some database segments recorded a high number of table scans during the snapshot period. Frequent table scans, particularly on large tables, can lead to excessive I/O and CPU usage, and may indicate missing indexes, stale statistics, or suboptimal SQL design. Analyze this section to identify the tables with the most full table scans, then determine the SQL statements accessing those tables and assess any tuning opportunities to improve performance and reduce I/O, and check the recommendations below.
+                
+                ### 💡 **Recommendation**  
+                - Identify SQL statements causing the highest table scans using AWR/ASH SQL details.  
+                - Create or optimize indexes to improve query selectivity and reduce full table scans.  
+                - Refresh table and index statistics to help the optimizer choose better execution plans.  
+                - Consider table partitioning to reduce scan size for large datasets.  
+                """
+            )
+
     else:
         st.warning("Segments by Table Scans section not found.")
 
@@ -1172,18 +1835,71 @@ with st.expander("📈 Advisory Statistics – PGA Advisory", expanded=False):
         df['PGA Target Est (MB)'] = df['PGA Target Est (MB)'].replace(',', '', regex=True).astype(float)
         df['Size Factr'] = df['Size Factr'].astype(str)
         df['Estd Time'] = df['Estd Time'].replace(',', '', regex=True).astype(float)
-        fig = go.Figure(go.Pie(labels=df['PGA Target Est (MB)'], values=df['Estd Time'], text=df['Size Factr'],
-                               textinfo='text', textposition='inside', marker=dict(line=dict(color='#000000', width=1)),
-                               hovertemplate="<b>PGA Target Est (MB):</b> %{label}<br><b>Estd Time:</b> %{value}<extra></extra>"))
-        fig.update_layout(title="PGA Advisory – Estd Time by PGA Target Est (MB)", showlegend=False,
-                          template='plotly_dark', margin=dict(t=50, b=0, l=0, r=0))
+
+        # Pie chart
+        fig = go.Figure(go.Pie(
+            labels=df['PGA Target Est (MB)'],
+            values=df['Estd Time'],
+            text=df['Size Factr'],
+            textinfo='text',
+            textposition='inside',
+            marker=dict(line=dict(color='#000000', width=1)),
+            hovertemplate="<b>PGA Target Est (MB):</b> %{label}<br><b>Estd Time:</b> %{value}<extra></extra>"
+        ))
+        fig.update_layout(
+            title="PGA Advisory – Estd Time by PGA Target Est (MB)",
+            showlegend=False,
+            template='plotly_dark',
+            margin=dict(t=50, b=0, l=0, r=0)
+        )
+
         chart_col, info_col = st.columns([3, 1])
         with chart_col:
             st.plotly_chart(fig, use_container_width=True)
         with info_col:
             st.info("**How to Read**\n\n- **Each slice** = `PGA Target Est (MB)`\n- **Slice size** = `Estd Time`\n- **Inside label** = `Size Factr`\n- **Hover shows**: PGA Target Est (MB), Estd Time")
+
+        # ✅ Determine current PGA row using Size Factr = 1
+        current_row = df[df['Size Factr'].astype(float) == 1]
+        if not current_row.empty:
+            current_time = current_row['Estd Time'].values[0]
+        else:
+            # Fallback to middle row if no Size Factr = 1 found
+            current_time = df.iloc[len(df) // 2]['Estd Time']
+
+        min_time = df['Estd Time'].min() if not df.empty else None
+
+        # ✅ Determine recommendation message
+        if current_time is not None and min_time is not None and current_time > 0:
+            improvement_ratio = (current_time - min_time) / current_time
+            if improvement_ratio > 0.1:  # More than 10% improvement
+                pga_message = "➡ **PGA Advisory detected — increasing PGA size may improve performance.**"
+            else:
+                pga_message = "✅ **PGA size is appropriate based on advisory data.**"
+        else:
+            pga_message = "ℹ **Unable to determine PGA tuning recommendation due to missing data.**"
+
+        # Observation & Recommendation dropdown
+        with st.expander("View Observations & Recommendations", expanded=False):
+            st.markdown(f"""
+**📝 Observation:**  
+The PGA Advisory estimates how PGA size affects work area performance.  
+If a larger PGA greatly reduces execution time or disk usage, increasing PGA memory may improve performance.  
+{pga_message}  
+
+**💡 Recommendation:**  
+- Compare the current estimated time with the minimum estimated time across different PGA sizes.  
+- If the estimated time consistently decreases with larger PGA sizes, consider increasing PGA size if required.  
+- Before increasing, ensure sufficient server memory is available, keeping at least 20% reserved for the OS as recommended.  
+            """)
+
     else:
         st.info("PGA Memory Advisory data not found.")
+
+
+
+
+
 
 # SGA Advisory
 st.markdown('<div id="sga-target-advisory"></div>', unsafe_allow_html=True)
@@ -1193,22 +1909,79 @@ with st.expander("▶️ SGA Target Advisory", expanded=False):
     if data.get('sga_advisory') is not None and not data['sga_advisory'].empty:
         sga_df = data['sga_advisory'].copy()
         sga_df.columns = [str(c).strip() for c in sga_df.columns]
+
+        # Convert numeric columns
         for col in ['SGA Target Size (M)', 'SGA Size Factor', 'Est DB Time (s)', 'Est Physical Reads']:
             sga_df[col] = sga_df[col].replace(',', '', regex=True).astype(float)
-        fig = px.pie(sga_df, values='Est DB Time (s)', names='SGA Target Size (M)',
-                     hover_data=['SGA Target Size (M)', 'Est DB Time (s)', 'Est Physical Reads'])
-        fig.update_traces(text=sga_df['SGA Size Factor'].astype(str), textposition='inside', textinfo='text',
-                          hovertemplate=("SGA Target Size (M): %{label}<br>Est DB Time (s): %{value}<br>Est Physical Reads: %{customdata[0]}<extra></extra>"),
-                          customdata=sga_df[['Est Physical Reads']], showlegend=False)
-        fig.update_layout(title='Estimated DB Time vs SGA Target Size Advisory', uniformtext_minsize=12,
-                          uniformtext_mode='hide', margin=dict(t=40, b=0, l=0, r=0))
+
+        # Create pie chart
+        fig = px.pie(
+            sga_df,
+            values='Est DB Time (s)',
+            names='SGA Target Size (M)',
+            hover_data=['SGA Target Size (M)', 'Est DB Time (s)', 'Est Physical Reads']
+        )
+        fig.update_traces(
+            text=sga_df['SGA Size Factor'].astype(str),
+            textposition='inside',
+            textinfo='text',
+            hovertemplate=("SGA Target Size (M): %{label}<br>Est DB Time (s): %{value}"
+                           "<br>Est Physical Reads: %{customdata[0]}<extra></extra>"),
+            customdata=sga_df[['Est Physical Reads']],
+            showlegend=False
+        )
+        fig.update_layout(
+            title='Estimated DB Time vs SGA Target Size Advisory',
+            uniformtext_minsize=12,
+            uniformtext_mode='hide',
+            margin=dict(t=40, b=0, l=0, r=0)
+        )
+
         col1, col2 = st.columns([3, 1])
         with col1:
             st.plotly_chart(fig, use_container_width=True)
         with col2:
             st.info("**How to Read**\n\n- Each slice = SGA Target Size (M)\n- Slice size = Est DB Time (s)\n- Inside label = Size Factor\n- Hover shows:\n  • SGA Target Size (M)\n  • Est DB Time (s)\n  • Est Physical Reads")
+
+        # ✅ Detect current SGA row using Size Factor = 1
+        current_row = sga_df[sga_df['SGA Size Factor'] == 1]
+        if not current_row.empty:
+            current_reads = current_row['Est Physical Reads'].values[0]
+        else:
+            # Fallback: use middle row if no Size Factor == 1 found
+            current_reads = sga_df.iloc[len(sga_df) // 2]['Est Physical Reads']
+
+        min_reads = sga_df['Est Physical Reads'].min()
+
+        # ✅ Determine message
+        if current_reads is not None and min_reads is not None and current_reads > 0:
+            improvement_ratio = (current_reads - min_reads) / current_reads
+            if improvement_ratio > 0.1:  # More than 10% improvement
+                observation_msg = "➡ **SGA Advisory detected — increasing SGA size may improve performance by reducing physical reads.**"
+            else:
+                observation_msg = "✅ **SGA size is appropriate based on advisory data.**"
+        else:
+            observation_msg = "Unable to determine SGA tuning recommendation due to missing data."
+
+        # Observation & Recommendation Dropdown
+        with st.expander("View Observations & Recommendations", expanded=False):
+            st.markdown(f"""
+**📝 Observation:**  
+{observation_msg}
+
+**💡 Recommendation:**  
+- Compare current estimated physical reads with the minimum value across different SGA sizes.  
+- If physical reads consistently decrease with larger SGA sizes, consider increasing SGA size if required.  
+- Ensure sufficient system memory is available, keeping at least 20% reserved for the OS.  
+            """)
+
     else:
         st.warning("SGA Target Advisory section not found or empty.")
+
+
+
+
+
 
 # Top SQL with Top Events
 st.markdown('<div id="top-sql-with-top-events"></div>', unsafe_allow_html=True)
@@ -1216,28 +1989,83 @@ st.write("")
 with st.expander("📝 Top SQL with Top Events", expanded=False):
     if not data['top_sql_events'].empty:
         chart_df = data['top_sql_events'].copy()
+
+        # ✅ Clean and normalize column names so 'Top Row Source' is always detected
+        chart_df.columns = [col.replace('\n', ' ').strip() for col in chart_df.columns]
+
         chart_df.rename(columns={
-            'SQL ID': 'sql_id', 'Plan Hash': 'plan_hash', 'Executions': 'executions',
-            'Event': 'event', 'Top Row Source': 'top_row_source', 'SQL Text': 'sql_text'
+            'SQL ID': 'sql_id',
+            'Plan Hash': 'plan_hash',
+            'Executions': 'executions',
+            'Event': 'event',
+            'Top Row Source': 'top_row_source',
+            'SQL Text': 'sql_text'
         }, inplace=True)
+
+        # Fill missing values so no row gets dropped
         chart_df = chart_df[['sql_id', 'plan_hash', 'executions', 'event', 'top_row_source', 'sql_text']]
-        chart_df = chart_df.fillna('').astype(str).apply(lambda x: x.str.strip())
-        chart_df = chart_df[(chart_df['sql_id'] != '') & (chart_df['plan_hash'] != '') &
-                            (chart_df['executions'] != '') & (chart_df['sql_text'] != '')]
+        chart_df = chart_df.fillna('N/A').astype(str).apply(lambda x: x.str.strip())
+
+        # Convert numeric columns
         chart_df['executions'] = pd.to_numeric(chart_df['executions'], errors='coerce').fillna(0).astype(int)
         chart_df['plan_hash'] = pd.to_numeric(chart_df['plan_hash'], errors='coerce').fillna(0).astype(int)
-        chart_df.sort_values(by='executions', ascending=False, inplace=True)
-        chart_df = chart_df.head(6).reset_index(drop=True)
+
+        # Group by SQL ID and event to ensure all IDs are considered
+        grouped_df = chart_df.groupby(['sql_id', 'event'], as_index=False).agg({
+            'executions': 'sum',
+            'plan_hash': 'first',
+            'top_row_source': 'first',
+            'sql_text': 'first'
+        })
+
+        # Pick top N SQL IDs by total executions (sum of all their events)
+        top_sql_ids = grouped_df.groupby('sql_id')['executions'].sum().nlargest(6).index
+        chart_df = grouped_df[grouped_df['sql_id'].isin(top_sql_ids)]
+
+        # Sort for horizontal bar chart
+        chart_df.sort_values(by='executions', ascending=True, inplace=True)
+
         if not chart_df.empty:
-            fig = px.bar(chart_df, x='executions', y='sql_id', orientation='h', text='executions',
-                         title='Top SQL with Top Events - Executions', color='event',
-                         hover_data={'sql_id': False, 'top_row_source': True, 'executions': True, 'event': True})
+            fig = px.bar(
+                chart_df,
+                x='executions',
+                y='sql_id',
+                orientation='h',
+                text='executions',
+                title='Top SQL with Top Events - Executions',
+                color='event',
+                hover_data={
+                    'sql_id': True,
+                    'plan_hash': True,
+                    'top_row_source': True,
+                    'executions': True,
+                    'event': True,
+                    'sql_text': True
+                }
+            )
             fig.update_layout(yaxis_title='SQL ID', xaxis_title='Executions', height=400)
             st.plotly_chart(fig, use_container_width=True)
+
+            # Observation & Recommendation dropdown
+            with st.expander("📄 Observation & Recommendation", expanded=False):
+                st.markdown(
+                    """
+                    ### 📦 **Observation**  
+                    This section displays SQL statements linked to the highest wait events during the snapshot period, detailing both the type and duration of waits for each SQL.  
+                    It also includes the **Top Row Source** info, which can reveal expensive operations like `TABLE ACCESS FULL`.
+
+                    ### 💡 **Recommendation**  
+                    - Focus tuning efforts on SQL statements where critical wait events are observed, as these can degrade performance.
+                    - Pay special attention to queries performing **FULL TABLE SCANS** (check `top_row_source` column).
+                    - Consider creating indexes, adding selective WHERE clauses, or partitioning large tables.
+                    """
+                )
         else:
             st.info("No valid rows found after filtering.")
     else:
         st.warning("Top SQL with Top Events section not found.")
+
+
 
 # Activity Over Time
 st.markdown('<div id="activity-over-time"></div>', unsafe_allow_html=True)
