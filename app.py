@@ -18,9 +18,8 @@ from auth import ENABLE_AUTH, login, logout
 
 st.set_page_config(page_title="AWR Analyzer", layout="wide")
 
-
-    # 🌙 Dark mode toggle can go here inside authenticated block
-    dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
+# 🌙 Dark mode toggle can go here inside authenticated block
+dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=False)
 
 
 # --- Initialize required session_state variables to avoid AttributeError ---
@@ -2279,3 +2278,4 @@ download_link = f'''
 </a>
 '''
 st.markdown(download_link, unsafe_allow_html=True)
+
